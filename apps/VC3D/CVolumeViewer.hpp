@@ -210,6 +210,8 @@ protected:
     bool _deferredInvalidateVis = false;
     bool _deferredInvalidateIntersect = false;
     bool _deferredRenderIntersections = false;
+    bool _deferredPlaneUpdate = false;
+    cv::Vec3f _deferredPlaneOrigin;
 
 };  // class CVolumeViewer
 
