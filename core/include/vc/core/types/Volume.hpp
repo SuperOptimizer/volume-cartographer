@@ -45,7 +45,7 @@ namespace volcart
             return seed;
         }
     };
-    
+
 /**
  * @class Volume
  * @author Sean Karlage
@@ -95,7 +95,7 @@ public:
     static Pointer New(
         volcart::filesystem::path path, Identifier uuid, std::string name);
     /**@}*/
-    
+
     /** is ZARR volume **/
     bool isZarr{false};
 
@@ -249,7 +249,7 @@ public:
 
     z5::Dataset *zarrDataset(int level = 0);
     size_t numScales();
-    
+
 protected:
     /** Slice width */
     int width_{0};
@@ -263,7 +263,7 @@ protected:
     z5::filesystem::handle::File *zarrFile_;
     std::vector<std::unique_ptr<z5::Dataset>> zarrDs_;
     nlohmann::json zarrGroup_;
-    
+
     /** Whether to use slice cache */
     bool cacheSlices_{true};
     /** Slice cache */

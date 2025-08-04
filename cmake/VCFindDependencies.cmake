@@ -44,6 +44,9 @@ endif()
 ### ceres-solver ###
 find_package(Ceres REQUIRED)
 
+
+include(BuildACVD)
+
 ### Z5 ###
 include(BuildZ5)
 

@@ -5,6 +5,8 @@ if(VC_BUILD_GUI)
 add_subdirectory(VC3D)
 endif()
 
+add_subdirectory(Canny)
+
 #################
 # CMD Line Apps #
 #################

@@ -1,5 +1,8 @@
 project(libvc_meshing VERSION ${VC_VERSION} LANGUAGES CXX)
 
+find_package(ITK REQUIRED)
+include(${ITK_USE_FILE})
+
 set(srcs
     src/ACVD.cpp
     src/CalculateNormals.cpp
@@ -23,6 +26,7 @@ target_include_directories(vc_meshing
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+        ${ITK_INCLUDE_DIRS}
 )
 target_link_libraries(vc_meshing
     PUBLIC
@@ -34,6 +38,7 @@ target_link_libraries(vc_meshing
         VTK::FiltersCore
         ACVD::DiscreteRemeshing
         ${private_deps}
+        ${ITK_LIBRARIES}
 )
 target_compile_features(vc_meshing PUBLIC cxx_std_17)
 set_target_properties(vc_meshing PROPERTIES

@@ -276,3 +276,27 @@ cmake .. -G Ninja \
 
 ninja -j$JOBS
 ninja install
+cd "$BUILD_DIR"
+
+
+rm -rf acvd
+git clone --depth 1 https://gitlab.com/educelab/acvd.git
+cd acvd
+
+# Make a build directory and compile
+mkdir build/ && cd build/
+cmake -DCMAKE_BUILD_TYPE=Release .. -GNinja \
+    -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+    -DCMAKE_C_FLAGS="${COMMON_FLAGS} -g0" \
+    -DCMAKE_CXX_FLAGS="${COMMON_FLAGS} -g0" \
+    -DCMAKE_EXE_LINKER_FLAGS="${COMMON_LDFLAGS}" \
+    -DCMAKE_SHARED_LINKER_FLAGS="${COMMON_LDFLAGS}" \
+    -DCMAKE_MODULE_LINKER_FLAGS="${COMMON_LDFLAGS}"
+
+ninja -j$JOBS
+ninja install

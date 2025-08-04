@@ -1,6 +1,7 @@
 # Canny app
 set(target vc_canny_segment)
 
+
 set(srcs
     CannySegment.cpp
     CannyThread.cpp

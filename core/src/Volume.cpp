@@ -177,3 +177,68 @@ size_t Volume::numScales()
 {
     return zarrDs_.size();
 }
+
+auto Volume::getSliceData(const int index) const -> cv::Mat
+{
+    if (cacheSlices_) {
+        return cache_slice_(index);
+    }
+    // Never memory map if caching is disabled. This is mostly because there's
+    // currently not a good way to clean up the mmap_info when not caching.
+    return load_slice_(index);
+}
+
+auto Volume::getSliceDataCopy(const int index) const -> cv::Mat
+{
+    return getSliceData(index).clone();
+}
+
+
+auto Volume::cache_slice_(const int index) const -> cv::Mat
+{
+    // Check if the slice is in the cache.
+    {
+        std::shared_lock lock(cacheMutex_);
+        if (cache_->contains(index)) {
+            return cache_->get(index).first;
+        }
+    }
+
+    {
+        // If the slice is not in the cache, get exclusive access to this
+        // slice's mutex. This slice can't be set until we're done.
+        // TODO: Is this faster than just getting an unique cache lock?
+        auto& mutex = sliceMutexes_[index];
+        std::unique_lock lockSlice(mutex);
+
+        // Check again to ensure the slice has not been added to the cache while
+        // waiting for the lock.
+        {
+            std::shared_lock lockCache(cacheMutex_);
+            if (cache_->contains(index)) {
+                return cache_->get(index).first;
+            }
+        }
+
+        // Load the slice and put it in the cache
+        cv::Mat slice;
+        std::optional<mmap_info> mmapInfo;
+        // If memory mapping, get the mmap_info too
+        if (memmap_) {
+            mmap_info i;
+            slice = load_slice_(index, &i);
+            mmapInfo = i;
+        } else {
+            slice = load_slice_(index);
+        }
+        std::unique_lock lockCache(cacheMutex_);
+        cache_->put(index, {slice, mmapInfo});
+        return slice;
+    }
+}
+
+void Volume::cachePurge() const
+{
+    std::unique_lock lock(cacheMutex_);
+    cache_->purge();
+}

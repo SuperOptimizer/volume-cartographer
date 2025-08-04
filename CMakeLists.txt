@@ -76,7 +76,15 @@ if(VC_DEVELOPER_WARNINGS)
     include(VCWarnings)
 endif()
 
+
+find_package(VTK REQUIRED COMPONENTS
+        CommonCore
+        FiltersGeneral
+        # Add other VTK components you need
+)
+
 add_subdirectory(core)
+add_subdirectory(meshing)
 if (VC_BUILD_TESTS)
     add_subdirectory(testing)
 endif()
