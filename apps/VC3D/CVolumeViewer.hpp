@@ -69,6 +69,7 @@ public:
 
     void fitSurfaceInView();
     void updateAllOverlays();
+    void processPOIUpdates();
 
     // Get current scale for coordinate transformation
     float getCurrentScale() const { return _scale; }
@@ -210,6 +211,8 @@ protected:
 
     int _downscale_override = 0;  // 0=auto, 1=2x, 2=4x, 3=8x, 4=16x, 5=32x
     QTimer* _overlayUpdateTimer;
+
+    std::unordered_map<std::string, POI*> _pendingPOIUpdates;
 
 };  // class CVolumeViewer
 

@@ -254,37 +254,69 @@ void CVolumeViewer::onZoom(int steps, QPointF scene_loc, Qt::KeyboardModifiers m
             adjustedSteps = (steps > 0) ? 1 : -1;
         }
 
-        _z_off += adjustedSteps;
+        // Check if this is a plane surface (xy, xz, yz)
+        PlaneSurface* plane = dynamic_cast<PlaneSurface*>(_surf);
+        if (plane && (_surf_name == "xy plane" || _surf_name == "xz plane" || _surf_name == "yz plane")) {
+            // For plane surfaces, move the plane origin through Z layers
+            cv::Vec3f origin = plane->origin();
 
-        POI *poi = _surf_col->poi("focus");
-        if (poi && volume) {
-            int newZ = static_cast<int>(poi->p[2] + adjustedSteps);
-            newZ = std::max(0, std::min(newZ, static_cast<int>(volume->numSlices() - 1)));
-            poi->p[2] = newZ;
-            _surf_col->setPOI("focus", poi);
-            emit sendZSliceChanged(newZ);
+            if (_surf_name == "xy plane") {
+                // XY plane moves along Z axis
+                origin[2] += adjustedSteps;
+            } else if (_surf_name == "xz plane") {
+                // XZ plane moves along Y axis
+                origin[1] += adjustedSteps;
+            } else if (_surf_name == "yz plane") {
+                // YZ plane moves along X axis
+                origin[0] += adjustedSteps;
+            }
+
+            // Clamp to volume bounds
+            if (volume) {
+                origin[0] = std::max(0.0f, std::min(origin[0], (float)volume->sliceWidth() - 1));
+                origin[1] = std::max(0.0f, std::min(origin[1], (float)volume->sliceHeight() - 1));
+                origin[2] = std::max(0.0f, std::min(origin[2], (float)volume->numSlices() - 1));
+            }
+
+            plane->setOrigin(origin);
+            _surf_col->setSurface(_surf_name, plane);
+
+            // Update focus POI to match new position
+            POI *poi = _surf_col->poi("focus");
+            if (poi) {
+                poi->p = origin;
+                _surf_col->setPOI("focus", poi);
+            }
+
+            // Clear intersection cache to force recalculation
+            invalidateIntersect();
+
+            emit sendZSliceChanged(static_cast<int>(origin[2]));
+        } else {
+            // Original behavior for segmentation and other surfaces
+            _z_off += adjustedSteps;
+
+            POI *poi = _surf_col->poi("focus");
+            if (poi && volume) {
+                int newZ = static_cast<int>(poi->p[2] + adjustedSteps);
+                newZ = std::max(0, std::min(newZ, static_cast<int>(volume->numSlices() - 1)));
+                poi->p[2] = newZ;
+                _surf_col->setPOI("focus", poi);
+                emit sendZSliceChanged(newZ);
+            }
         }
 
         renderVisible(true);
     }
     else {
+        // Regular zoom code unchanged...
         float zoom = pow(ZOOM_FACTOR, steps);
         _scale *= zoom;
         round_scale(_scale);
         recalcScales();
 
-        // Cache the view-space mouse position; used later for cursor update
         QPoint pointViewportBefore = fGraphicsView->mapFromScene(scene_loc);
-
-        // The above scale is *not* part of Qt's scene-to-view transform, but part of the voxel-to-scene transform
-        // implemented in PlaneSurface::project; it causes a zoom around the surface origin
-        // Translations are represented in the Qt scene-to-view transform; these move the surface origin within the viewpoint
-        // To zoom centered on the mouse, we adjust the scene-to-view translation appropriately
-        // If the mouse were at the plane/surface origin, this adjustment should be zero
-        // If the mouse were right of the plane origin, should translate to the left so that point ends up where it was
         fGraphicsView->translate(scene_loc.x() * (1 - zoom), scene_loc.y() * (1 - zoom));
-
-        // Update the cursor (which lives in scene space) to still lie under the mouse even after the above translation
         QPointF pointSceneAfter = fGraphicsView->mapToScene(pointViewportBefore);
         onCursorMove(pointSceneAfter);
 
@@ -292,7 +324,7 @@ void CVolumeViewer::onZoom(int steps, QPointF scene_loc, Qt::KeyboardModifiers m
         int max_size = 100000;
         fGraphicsView->setSceneRect(-max_size/2, -max_size/2, max_size, max_size);
 
-        renderVisible(); // Immediate render for smooth zooming
+        renderVisible();
     }
 
     _lbl->setText(QString("%1x %2").arg(_scale).arg(_z_off));
@@ -631,83 +663,17 @@ QGraphicsItem *crossItem()
     return parent;
 }
 
-//TODO make poi tracking optional and configurable
 void CVolumeViewer::onPOIChanged(std::string name, POI *poi)
-{    
+{
     if (!poi || !_surf)
         return;
-    
-    if (name == "focus") {
-        // Add safety check before dynamic_cast
-        if (!_surf) {
-            return;
-        }
-        
-        if (auto* plane = dynamic_cast<PlaneSurface*>(_surf)) {
-            fGraphicsView->centerOn(0,0);
-            if (poi->p == plane->origin())
-                return;
-            
-            plane->setOrigin(poi->p);
-            refreshPointPositions();
-            
-            _surf_col->setSurface(_surf_name, plane);
-        } else if (auto* quad = dynamic_cast<QuadSurface*>(_surf)) {
-            SurfacePointer* ptr = quad->pointer();
-            float dist = quad->pointTo(ptr, poi->p, 4.0, 100);
-            
-            if (dist < 4.0) {
-                cv::Vec3f sp = quad->loc(ptr) * _scale;
-                if (_center_marker) {
-                    _center_marker->setPos(sp[0], sp[1]);
-                    _center_marker->show();
-                }
-                fGraphicsView->centerOn(sp[0], sp[1]);
-            } else {
-                if (_center_marker) {
-                    _center_marker->hide();
-                }
-            }
-            delete ptr;
-        }
-    }
-    else if (name == "cursor") {
-        // Add safety check before dynamic_cast
-        if (!_surf) {
-            return;
-        }
-        
-        PlaneSurface *slice_plane = dynamic_cast<PlaneSurface*>(_surf);
-        // QuadSurface *crop = dynamic_cast<QuadSurface*>(_surf_col->surface("visible_segmentation"));
-        QuadSurface *crop = dynamic_cast<QuadSurface*>(_surf_col->surface("segmentation"));
-        
-        cv::Vec3f sp;
-        float dist = -1;
-        if (slice_plane) {            
-            dist = slice_plane->pointDist(poi->p);
-            sp = slice_plane->project(poi->p, 1.0, _scale);
-        }
-        else if (_surf_name == "segmentation" && crop)
-        {
-            SurfacePointer *ptr = crop->pointer();
-            dist = crop->pointTo(ptr, poi->p, 2.0);
-            sp = crop->loc(ptr)*_scale ;//+ cv::Vec3f(_vis_center[0],_vis_center[1],0);
-        }
-        
-        if (!_cursor) {
-            _cursor = cursorItem(_drawingModeActive, _brushSize, _brushIsSquare);
-            fScene->addItem(_cursor);
-        }
-        
-        if (dist != -1) {
-            if (dist < 20.0/_scale) {
-                _cursor->setPos(sp[0], sp[1]);
-                _cursor->setOpacity(1.0-dist*_scale/20.0);
-            }
-            else
-                _cursor->setOpacity(0.0);
-        }
-    }
+
+    // Store pending update
+    _pendingPOIUpdates[name] = poi;
+
+    // Defer the actual update
+    _overlayUpdateTimer->stop();
+    _overlayUpdateTimer->start();
 }
 
 cv::Mat CVolumeViewer::render_area(const cv::Rect &roi)
@@ -1745,9 +1711,75 @@ void CVolumeViewer::setResetViewOnSurfaceChange(bool reset)
 
 void CVolumeViewer::updateAllOverlays()
 {
+    processPOIUpdates();
     invalidateVis();
     invalidateIntersect();
     renderIntersections();
     renderPaths();
     refreshPointPositions();
+}
+
+void CVolumeViewer::processPOIUpdates()
+{
+    for (const auto& [name, poi] : _pendingPOIUpdates) {
+        if (name == "focus") {
+            if (auto* plane = dynamic_cast<PlaneSurface*>(_surf)) {
+                fGraphicsView->centerOn(0,0);
+                if (poi->p != plane->origin()) {
+                    plane->setOrigin(poi->p);
+                    refreshPointPositions();
+                    _surf_col->setSurface(_surf_name, plane);
+                }
+            } else if (auto* quad = dynamic_cast<QuadSurface*>(_surf)) {
+                SurfacePointer* ptr = quad->pointer();
+                float dist = quad->pointTo(ptr, poi->p, 4.0, 100);
+
+                if (dist < 4.0) {
+                    cv::Vec3f sp = quad->loc(ptr) * _scale;
+                    if (_center_marker) {
+                        _center_marker->setPos(sp[0], sp[1]);
+                        _center_marker->show();
+                    }
+                    fGraphicsView->centerOn(sp[0], sp[1]);
+                } else {
+                    if (_center_marker) {
+                        _center_marker->hide();
+                    }
+                }
+                delete ptr;
+            }
+        }
+        else if (name == "cursor") {
+            // Update cursor position
+            PlaneSurface *slice_plane = dynamic_cast<PlaneSurface*>(_surf);
+            QuadSurface *crop = dynamic_cast<QuadSurface*>(_surf_col->surface("segmentation"));
+
+            cv::Vec3f sp;
+            float dist = -1;
+            if (slice_plane) {
+                dist = slice_plane->pointDist(poi->p);
+                sp = slice_plane->project(poi->p, 1.0, _scale);
+            }
+            else if (_surf_name == "segmentation" && crop) {
+                SurfacePointer *ptr = crop->pointer();
+                dist = crop->pointTo(ptr, poi->p, 2.0);
+                sp = crop->loc(ptr)*_scale;
+            }
+
+            if (!_cursor) {
+                _cursor = cursorItem(_drawingModeActive, _brushSize, _brushIsSquare);
+                fScene->addItem(_cursor);
+            }
+
+            if (dist != -1) {
+                if (dist < 20.0/_scale) {
+                    _cursor->setPos(sp[0], sp[1]);
+                    _cursor->setOpacity(1.0-dist*_scale/20.0);
+                }
+                else
+                    _cursor->setOpacity(0.0);
+            }
+        }
+    }
+    _pendingPOIUpdates.clear();
 }
