@@ -20,6 +20,8 @@
 
 #include "vc/core/util/Slicing.hpp"
 #include "vc/core/util/Surface.hpp"
+#include "vc/core/util/DateTime.hpp"
+#include "vc/core/math/MathUtils.hpp"
 #include "vc/core/io/PointSetIO.hpp"
 
 #include <unordered_map>

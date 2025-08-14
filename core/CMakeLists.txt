@@ -38,6 +38,9 @@ set(surface_srcs
     src/SurfaceHelpers.cpp
     src/ChunkedTensor.cpp
     src/SurfaceVoxelizer.cpp
+        src/SurfaceTracker.cpp
+        src/GrowSurfaceFromSurfaces.cpp
+        src/SurfaceModeling.cpp
 )
 add_library(vc_surface
     ${surface_srcs}
