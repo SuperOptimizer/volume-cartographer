@@ -86,7 +86,6 @@ size_t SurfaceTracker::vec2i_hash::operator()(cv::Vec2i p) const {
 
 SurfaceTracker::~SurfaceTracker()
 {
-    // Default destructor - STL containers handle their own cleanup
 }
 
 // Data access methods

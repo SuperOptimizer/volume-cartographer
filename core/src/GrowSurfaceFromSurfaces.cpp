@@ -23,38 +23,49 @@
 #include <fstream>
 #include <iostream>
 
-struct resId_hash {
-    size_t operator()(SurfaceTracker::resId_t id) const
-    {
-        size_t hash1 = std::hash<int>{}(id._type);
-        size_t hash2 = std::hash<void*>{}(id._sm);
-        size_t hash3 = std::hash<int>{}(id._p[0]);
-        size_t hash4 = std::hash<int>{}(id._p[1]);
+QuadSurface* save_surface(SurfaceTracker& tracker,
+                          cv::Mat_<uint8_t>& state,
+                          cv::Mat_<cv::Vec3d>& points,
+                          cv::Rect& used_area,
+                          float step,
+                          float src_step,
+                          float voxelsize,
+                          const nlohmann::json& params,
+                          const std::filesystem::path& tgt_dir,
+                          const std::string& suffix = "")
+{
+    // Generate high-resolution points
+    cv::Rect used_area_hr = {used_area.x * (int)step,
+                             used_area.y * (int)step,
+                             used_area.width * (int)step,
+                             used_area.height * (int)step};
+    cv::Mat_<cv::Vec3d> points_hr = tracker.genPointsHR(state, points, used_area, step, src_step);
 
-        //magic numbers from boost. should be good enough
-        size_t hash = hash1  ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2));
-        hash =  hash  ^ (hash3 + 0x9e3779b9 + (hash << 6) + (hash >> 2));
-        hash =  hash  ^ (hash4 + 0x9e3779b9 + (hash << 6) + (hash >> 2));
+    // Create surface
+    QuadSurface* surf = new QuadSurface(points_hr(used_area_hr), {1/src_step, 1/src_step});
+    surf->meta = new nlohmann::json;
 
-        return hash;
-    }
-};
+    // Calculate area metrics
+    int loc_valid_count = 0;
+    for(int j = used_area.y; j < used_area.br().y - 1; j++)
+        for(int i = used_area.x; i < used_area.br().x - 1; i++)
+            if (state(j, i) & STATE_LOC_VALID)
+                loc_valid_count++;
 
+    float area_est_vx2 = loc_valid_count * src_step * src_step * step * step;
+    float area_est_cm2 = area_est_vx2 * voxelsize * voxelsize / 1e8;
 
-struct SurfPoint_hash {
-    size_t operator()(SurfaceTracker::SurfPoint p) const
-    {
-        size_t hash1 = std::hash<void*>{}(p.first);
-        size_t hash2 = std::hash<int>{}(p.second[0]);
-        size_t hash3 = std::hash<int>{}(p.second[1]);
+    // Set metadata
+    (*surf->meta)["area_vx2"] = area_est_vx2;
+    (*surf->meta)["area_cm2"] = area_est_cm2;
+    (*surf->meta)["vc_grow_seg_from_segments_params"] = params;
 
-        //magic numbers from boost. should be good enough
-        size_t hash = hash1  ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2));
-        hash =  hash  ^ (hash3 + 0x9e3779b9 + (hash << 6) + (hash >> 2));
+    // Generate UUID and save
+    std::string uuid = Z_DBG_GEN_PREFIX + get_surface_time_str() + suffix;
+    surf->save(tgt_dir / uuid, uuid);
 
-        return hash;
-    }
-};
+    return surf;
+}
 
 QuadSurface *grow_surf_from_surfs(SurfaceMeta *seed, const std::vector<SurfaceMeta*> &surfs_v, const nlohmann::json &params, float voxelsize)
 {
@@ -540,20 +551,10 @@ QuadSurface *grow_surf_from_surfs(SurfaceMeta *seed, const std::vector<SurfaceMe
             update_mapping = false;
 
         if (generation % 50 == 0 || update_mapping) {
-            {
-                cv::Mat_<cv::Vec3d> points_hr = tracker.genPointsHR(state, points, used_area, step, src_step);
-                QuadSurface *dbg_surf = new QuadSurface(points_hr(used_area_hr), {1/src_step,1/src_step});
-                dbg_surf->meta = new nlohmann::json;
-                (*dbg_surf->meta)["vc_grow_seg_from_segments_params"] = params;
-
-                float const area_est_vx2 = loc_valid_count*src_step*src_step*step*step;
-                float const area_est_cm2 = area_est_vx2 * voxelsize * voxelsize / 1e8;
-                (*dbg_surf->meta)["area_vx2"] = area_est_vx2;
-                (*dbg_surf->meta)["area_cm2"] = area_est_cm2;
-                std::string uuid = Z_DBG_GEN_PREFIX+get_surface_time_str();
-                dbg_surf->save(tgt_dir / uuid, uuid);
-                delete dbg_surf;
-            }
+            QuadSurface* dbg_surf = save_surface(tracker, state, points, used_area,
+                                                 step, src_step, voxelsize, params,
+                                                 tgt_dir);
+            delete dbg_surf;
         }
 
         if (update_mapping) {
@@ -576,20 +577,10 @@ QuadSurface *grow_surf_from_surfs(SurfaceMeta *seed, const std::vector<SurfaceMe
                     if (state(j,i) & STATE_LOC_VALID)
                         fringe.insert(cv::Vec2i(j,i));
 
-            {
-                cv::Mat_<cv::Vec3d> points_hr = tracker.genPointsHR(state, points, used_area, step, src_step);
-                QuadSurface *dbg_surf = new QuadSurface(points_hr(used_area_hr), {1/src_step,1/src_step});
-                dbg_surf->meta = new nlohmann::json;
-                (*dbg_surf->meta)["vc_grow_seg_from_segments_params"] = params;
-
-                std::string uuid = Z_DBG_GEN_PREFIX+get_surface_time_str()+"_opt";
-                float const area_est_vx2 = loc_valid_count*src_step*src_step*step*step;
-                float const area_est_cm2 = area_est_vx2 * voxelsize * voxelsize / 1e8;
-                (*dbg_surf->meta)["area_vx2"] = area_est_vx2;
-                (*dbg_surf->meta)["area_cm2"] = area_est_cm2;
-                dbg_surf->save(tgt_dir / uuid, uuid);
-                delete dbg_surf;
-            }
+            QuadSurface* dbg_surf = save_surface(tracker, state, points, used_area,
+                                         step, src_step, voxelsize, params,
+                                         tgt_dir, "_opt");
+            delete dbg_surf;
         }
 
         float const current_area_vx2 = loc_valid_count*src_step*src_step*step*step;
@@ -653,11 +644,9 @@ QuadSurface *grow_surf_from_surfs(SurfaceMeta *seed, const std::vector<SurfaceMe
 
     cv::Mat_<cv::Vec3d> points_hr = tracker.genPointsHR(state, points, used_area, step, src_step);
 
-    QuadSurface *surf = new QuadSurface(points_hr(used_area_hr), {1/src_step,1/src_step});
-
-    surf->meta = new nlohmann::json;
-    (*surf->meta)["area_vx2"] = area_est_vx2;
-    (*surf->meta)["area_cm2"] = area_est_cm2;
+    QuadSurface* surf = save_surface(tracker, state, points, used_area,
+                                 step, src_step, voxelsize, params,
+                                 tgt_dir);
 
     return surf;
 }

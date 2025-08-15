@@ -289,3 +289,36 @@ int SurfaceTracker::condSpaceLineLoss(int bit, const cv::Vec2i& p, const cv::Vec
     return set;
 }
 
+
+struct resId_hash {
+    size_t operator()(SurfaceTracker::resId_t id) const
+    {
+        size_t hash1 = std::hash<int>{}(id._type);
+        size_t hash2 = std::hash<void*>{}(id._sm);
+        size_t hash3 = std::hash<int>{}(id._p[0]);
+        size_t hash4 = std::hash<int>{}(id._p[1]);
+
+        //magic numbers from boost. should be good enough
+        size_t hash = hash1  ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2));
+        hash =  hash  ^ (hash3 + 0x9e3779b9 + (hash << 6) + (hash >> 2));
+        hash =  hash  ^ (hash4 + 0x9e3779b9 + (hash << 6) + (hash >> 2));
+
+        return hash;
+    }
+};
+
+
+struct SurfPoint_hash {
+    size_t operator()(SurfaceTracker::SurfPoint p) const
+    {
+        size_t hash1 = std::hash<void*>{}(p.first);
+        size_t hash2 = std::hash<int>{}(p.second[0]);
+        size_t hash3 = std::hash<int>{}(p.second[1]);
+
+        //magic numbers from boost. should be good enough
+        size_t hash = hash1  ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2));
+        hash =  hash  ^ (hash3 + 0x9e3779b9 + (hash << 6) + (hash >> 2));
+
+        return hash;
+    }
+};
