@@ -252,71 +252,6 @@ bool ChunkCache::has(cv::Vec4i idx)
 }
 
 
-// Add this helper function before readInterpolated3D
-void speculativeLoadNeighbors(z5::Dataset *ds, ChunkCache *cache, int group_idx,
-                               int iz, int iy, int ix) {
-    // Define the 26 neighbors in a 3x3x3 cube (excluding center)
-    static const std::vector<std::array<int, 3>> neighbors = {
-        // Same z-plane (8 neighbors)
-        {-1, -1, 0}, {0, -1, 0}, {1, -1, 0},
-        {-1, 0, 0},              {1, 0, 0},
-        {-1, 1, 0},  {0, 1, 0},  {1, 1, 0},
-        // z-1 plane (9 neighbors)
-        {-1, -1, -1}, {0, -1, -1}, {1, -1, -1},
-        {-1, 0, -1},  {0, 0, -1},  {1, 0, -1},
-        {-1, 1, -1},  {0, 1, -1},  {1, 1, -1},
-        // z+1 plane (9 neighbors)
-        {-1, -1, 1}, {0, -1, 1}, {1, -1, 1},
-        {-1, 0, 1},  {0, 0, 1},  {1, 0, 1},
-        {-1, 1, 1},  {0, 1, 1},  {1, 1, 1}
-    };
-
-    // Get dataset dimensions in chunks
-    auto shape = ds->shape();
-    auto chunkShape = ds->chunking().blockShape();
-    int max_iz = (shape[0] + chunkShape[0] - 1) / chunkShape[0];
-    int max_iy = (shape[1] + chunkShape[1] - 1) / chunkShape[1];
-    int max_ix = (shape[2] + chunkShape[2] - 1) / chunkShape[2];
-
-    // Try to load each neighbor
-    for (const auto& offset : neighbors) {
-        int nz = iz + offset[2];
-        int ny = iy + offset[1];
-        int nx = ix + offset[0];
-
-        // Check bounds
-        if (nz < 0 || nz >= max_iz ||
-            ny < 0 || ny >= max_iy ||
-            nx < 0 || nx >= max_ix) {
-            continue;
-        }
-
-        cv::Vec4i neighbor_idx = {group_idx, nz, ny, nx};
-
-        // Check if already in cache
-        cache->mutex.lock();
-        bool needs_load = !cache->has(neighbor_idx);
-        cache->mutex.unlock();
-
-        if (needs_load) {
-            // Load the chunk
-            auto chunk = z5::multiarray::readChunk<uint8_t>(*ds,
-                {size_t(nz), size_t(ny), size_t(nx)});
-
-            // Add to cache
-            cache->mutex.lock();
-            // Double-check it wasn't loaded by another thread
-            if (!cache->has(neighbor_idx)) {
-                cache->put(neighbor_idx, chunk);
-            } else {
-                // Another thread loaded it, delete our copy
-                delete chunk;
-            }
-            cache->mutex.unlock();
-        }
-    }
-}
-
 void readInterpolated3D(cv::Mat_<uint8_t> &out, z5::Dataset *ds,
                         const cv::Mat_<cv::Vec3f> &coords, ChunkCache *cache) {
     out = cv::Mat_<uint8_t>(coords.size(), 0);
@@ -376,16 +311,6 @@ void readInterpolated3D(cv::Mat_<uint8_t> &out, z5::Dataset *ds,
 
     size_t done = 0;
 
-    // Track which chunks we've already speculatively loaded
-    std::set<cv::Vec4i, std::function<bool(const cv::Vec4i&, const cv::Vec4i&)>>
-        speculatively_loaded([](const cv::Vec4i& a, const cv::Vec4i& b) {
-            if (a[0] != b[0]) return a[0] < b[0];
-            if (a[1] != b[1]) return a[1] < b[1];
-            if (a[2] != b[2]) return a[2] < b[2];
-            return a[3] < b[3];
-        });
-    std::mutex speculative_mutex;
-
 #pragma omp parallel
     {
         cv::Vec4i last_idx = {-1,-1,-1,-1};
@@ -429,24 +354,6 @@ void readInterpolated3D(cv::Mat_<uint8_t> &out, z5::Dataset *ds,
                         cache->put(idx, chunk);
                         chunk_ref = cache->get(idx);
                         cache->mutex.unlock();
-
-                        // Speculatively load neighbors for this new chunk
-                        bool should_speculate = false;
-                        speculative_mutex.lock();
-                        if (speculatively_loaded.find(idx) == speculatively_loaded.end()) {
-                            speculatively_loaded.insert(idx);
-                            should_speculate = true;
-                        }
-                        speculative_mutex.unlock();
-
-                        if (should_speculate) {
-                            // Launch speculative loading in a separate task
-                            #pragma omp task
-                            {
-                                speculativeLoadNeighbors(ds, cache, group_idx,
-                                                       ix, iy, iz);
-                            }
-                        }
                     } else {
                         chunk_ref = cache->get(idx);
                         chunk = chunk_ref.get();
@@ -517,11 +424,8 @@ void readInterpolated3D(cv::Mat_<uint8_t> &out, z5::Dataset *ds,
                 }
             }
         }
-        #pragma omp taskwait
     }
 }
-
-
 
 //somehow opencvs functions are pretty slow 
 static inline cv::Vec3f normed(const cv::Vec3f v)
