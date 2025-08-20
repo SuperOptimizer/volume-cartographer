@@ -57,6 +57,10 @@ private:
     std::unordered_map<std::string,int> _group_store;
 
     std::shared_mutex _mutex;
+
+    std::unordered_map<cv::Vec4i,xt::svector<size_t>,vec4i_hash> _zero_chunks;
+    bool isAllZeros(const xt::xarray<uint8_t> *ar) const;
+    std::shared_ptr<xt::xarray<uint8_t>> createZeroChunk(const xt::xarray<uint8_t> *reference) const;
 };
 
 //NOTE depending on request this might load a lot (the whole array) into RAM

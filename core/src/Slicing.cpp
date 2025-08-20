@@ -63,9 +63,9 @@ static std::ostream& operator<< (std::ostream& out, const xt::svector<size_t> &v
 namespace z5 {
     namespace multiarray {
 
+
         template<typename T>
-        inline xt::xarray<T> *readChunk(const Dataset & ds,
-                            types::ShapeType chunkId)
+        inline xt::xarray<T> *readChunk(const Dataset & ds, types::ShapeType chunkId)
         {
             if (!ds.chunkExists(chunkId)) {
                 return nullptr;
@@ -75,22 +75,16 @@ namespace z5 {
                 throw std::runtime_error("only zarr datasets supported currently!");
             if (ds.getDtype() != z5::types::Datatype::uint8 && ds.getDtype() != z5::types::Datatype::uint16)
                 throw std::runtime_error("only uint8_t/uint16 zarrs supported currently!");
-            
+
             types::ShapeType chunkShape;
-            // size_t chunkSize;
             ds.getChunkShape(chunkId, chunkShape);
-            // get the shape of the chunk (as stored it is stored)
-            //for ZARR also edge chunks are always full size!
-            const std::size_t maxChunkSize = ds.defaultChunkSize();
             const auto & maxChunkShape = ds.defaultChunkShape();
-            
-            // chunkSize = std::accumulate(chunkShape.begin(), chunkShape.end(), 1, std::multiplies<std::size_t>());
-            
+            const std::size_t maxChunkSize = ds.defaultChunkSize();
+
             xt::xarray<T> *out = new xt::xarray<T>();
             *out = xt::empty<T>(maxChunkShape);
-            
-            
-            // read/decompress & convert data
+
+            // Read/decompress & convert data
             if (ds.getDtype() == z5::types::Datatype::uint8) {
                 ds.readChunk(chunkId, out->data());
             }
@@ -103,7 +97,7 @@ namespace z5 {
                 for(int i=0;i<maxChunkSize;i++)
                     p8[i] = p16[i] / 257;
             }
-            
+
             return out;
         }
     }
@@ -117,31 +111,57 @@ int ChunkCache::groupIdx(std::string name)
      return _group_store[name];
 }
     
+
 void ChunkCache::put(cv::Vec4i idx, xt::xarray<uint8_t> *ar)
 {
+    // Check if this is an all-zero chunk
+    if (ar && isAllZeros(ar)) {
+        // Store shape in zero chunks map, don't use actual storage
+        _zero_chunks[idx] = ar->shape();
+
+        // Clean up the input array since we don't need it
+        delete ar;
+
+        // Remove from regular storage if it was there before
+        if (_store.count(idx)) {
+            std::shared_ptr<xt::xarray<uint8_t>> old_ar = _store[idx];
+            if (old_ar.get()) {
+                _stored -= old_ar->size();
+            }
+            _store.erase(idx);
+            _gen_store.erase(idx);
+        }
+
+        return;
+    }
+
+    // Remove from zero set if it was there before
+    _zero_chunks.erase(idx);
+
+    // Regular LRU eviction logic (unchanged)
     if (_stored >= _size) {
         using KP = std::pair<cv::Vec4i, uint64_t>;
         std::vector<KP> gen_list(_gen_store.begin(), _gen_store.end());
         std::sort(gen_list.begin(), gen_list.end(), [](KP &a, KP &b){ return a.second < b.second; });
+
         for(auto it : gen_list) {
-            std::shared_ptr<xt::xarray<uint8_t>> ar = _store[it.first];
-            //TODO we could remove this with lower probability so we dont store infiniteyl empty blocks but also keep more of them as they are cheap
-            if (ar.get()) {
-                size_t size = ar.get()->storage().size();
-                ar.reset();
+            std::shared_ptr<xt::xarray<uint8_t>> stored_ar = _store[it.first];
+            if (stored_ar.get()) {
+                size_t size = stored_ar->size();
+                stored_ar.reset();
                 _stored -= size;
-            
+
                 _store.erase(it.first);
                 _gen_store.erase(it.first);
             }
 
-            //we delete 10% of cache content to amortize sorting costs
             if (_stored < 0.9*_size) {
                 break;
             }
         }
     }
 
+    // Store non-zero chunk normally
     if (ar) {
         if (_store.count(idx)) {
             assert(_store[idx].get());
@@ -153,6 +173,7 @@ void ChunkCache::put(cv::Vec4i idx, xt::xarray<uint8_t> *ar)
     _generation++;
     _gen_store[idx] = _generation;
 }
+
 
 //algorithm 2: do interpolation on basis of individual chunks
 void readArea3D(xt::xtensor<uint8_t,3,xt::layout_type::column_major> &out, const cv::Vec3i offset, z5::Dataset *ds, ChunkCache *cache)
@@ -229,6 +250,7 @@ void ChunkCache::reset()
     _gen_store.clear();
     _group_store.clear();
     _store.clear();
+    _zero_chunks.clear();
 
     _generation = 0;
     _stored = 0;
@@ -236,6 +258,16 @@ void ChunkCache::reset()
 
 std::shared_ptr<xt::xarray<uint8_t>> ChunkCache::get(cv::Vec4i idx)
 {
+    // Check zero chunks first
+    auto zero_it = _zero_chunks.find(idx);
+    if (zero_it != _zero_chunks.end()) {
+        // Create and return a zero chunk with the stored shape
+        auto zero_chunk = std::make_shared<xt::xarray<uint8_t>>();
+        *zero_chunk = xt::zeros<uint8_t>(zero_it->second);
+        return zero_chunk;
+    }
+
+    // Regular storage lookup
     auto res = _store.find(idx);
     if (res == _store.end())
         return nullptr;
@@ -248,7 +280,7 @@ std::shared_ptr<xt::xarray<uint8_t>> ChunkCache::get(cv::Vec4i idx)
 
 bool ChunkCache::has(cv::Vec4i idx)
 {
-    return _store.count(idx);
+    return _zero_chunks.count(idx) || _store.count(idx);
 }
 
 
@@ -761,4 +793,34 @@ cv::Mat_<cv::Vec3f> vc_segmentation_calc_normals(const cv::Mat_<cv::Vec3f> &poin
                 normals(j,i) = normed(normals(j,i));
     
     return normals;
+}
+
+bool ChunkCache::isAllZeros(const xt::xarray<uint8_t> *ar) const
+{
+    if (!ar) return false;
+
+    const uint8_t* data = ar->data();
+    size_t size = ar->size();
+
+    // Fast check - compare chunks of uint64_t when possible
+    size_t uint64_count = size / 8;
+    const uint64_t* data64 = reinterpret_cast<const uint64_t*>(data);
+
+    for (size_t i = 0; i < uint64_count; ++i) {
+        if (data64[i] != 0) return false;
+    }
+
+    // Check remaining bytes
+    for (size_t i = uint64_count * 8; i < size; ++i) {
+        if (data[i] != 0) return false;
+    }
+
+    return true;
+}
+
+std::shared_ptr<xt::xarray<uint8_t>> ChunkCache::createZeroChunk(const xt::xarray<uint8_t> *reference) const
+{
+    auto zero_chunk = std::make_shared<xt::xarray<uint8_t>>();
+    *zero_chunk = xt::zeros<uint8_t>(reference->shape());
+    return zero_chunk;
 }
