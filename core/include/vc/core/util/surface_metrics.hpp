@@ -3,7 +3,7 @@
 #include "vc/core/util/VCCollection.hpp"
 #include "vc/core/util/Surface.hpp"
 
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 
 namespace vc::apps
 {

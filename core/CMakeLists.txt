@@ -52,7 +52,7 @@ target_link_libraries(vc_surface
         opencv_core
         opencv_video
         z5
-        nlohmann_json::nlohmann_json
+        glaze::glaze
 )
 target_include_directories(vc_surface
     PUBLIC
@@ -106,7 +106,7 @@ target_link_libraries(vc_core
         opencv_imgproc
         opencv_imgcodecs
         spdlog::spdlog
-        nlohmann_json::nlohmann_json
+        glaze::glaze
         z5
         CURL::libcurl
     PRIVATE

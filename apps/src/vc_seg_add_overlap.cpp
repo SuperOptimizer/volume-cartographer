@@ -1,6 +1,6 @@
 #include "vc/core/util/Slicing.hpp"
 #include "vc/core/util/Surface.hpp"
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 #include <fstream>
 
 namespace fs = std::filesystem;

@@ -1,7 +1,5 @@
 #include "vc/core/util/Slicing.hpp"
 
-#include <nlohmann/json.hpp>
-
 #include "vc/core/util/xtensor_include.hpp"
 #include XTENSORINCLUDE(containers, xarray.hpp)
 #include XTENSORINCLUDE(views, xaxis_slice_iterator.hpp)

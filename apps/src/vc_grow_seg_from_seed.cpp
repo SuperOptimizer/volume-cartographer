@@ -3,7 +3,7 @@
 #include "vc/core/types/ChunkedTensor.hpp"
 
 #include "z5/factory.hxx"
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 
 #include <omp.h>
 

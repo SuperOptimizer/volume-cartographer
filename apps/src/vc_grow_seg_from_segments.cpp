@@ -1,4 +1,4 @@
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 
 #include "vc/core/util/xtensor_include.hpp"
 #include XTENSORINCLUDE(containers, xarray.hpp)

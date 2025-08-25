@@ -4,7 +4,7 @@
 #include <z5/filesystem/handle.hxx>
 #include <z5/multiarray/xtensor_access.hxx>
 #include <z5/attributes.hxx>
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 #include <cmath>
 #include <algorithm>
 #include <iostream>

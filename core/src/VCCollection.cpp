@@ -3,97 +3,15 @@
 #include <algorithm>
 #include <vector>
 #include <fstream>
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 
-NLOHMANN_JSON_NAMESPACE_BEGIN
-template <>
-struct adl_serializer<cv::Vec3f> {
-    static void to_json(json& j, const cv::Vec3f& v) {
-        j = {v[0], v[1], v[2]};
-    }
 
-    static void from_json(const json& j, cv::Vec3f& v) {
-        j.at(0).get_to(v[0]);
-        j.at(1).get_to(v[1]);
-        j.at(2).get_to(v[2]);
-    }
-};
-NLOHMANN_JSON_NAMESPACE_END
  
 #define VC_POINTCOLLECTIONS_JSON_VERSION "1"
 
 namespace ChaoVis
 {
 
-using json = nlohmann::json;
- 
-void to_json(json& j, const ColPoint& p) {
-    j = json{
-        {"p", p.p},
-        {"creation_time", p.creation_time}
-    };
-    if (!std::isnan(p.winding_annotation)) {
-        j["wind_a"] = p.winding_annotation;
-    } else {
-        j["wind_a"] = nullptr;
-    }
-}
- 
-void from_json(const json& j, ColPoint& p) {
-    j.at("p").get_to(p.p);
-    if (j.contains("wind_a") && !j.at("wind_a").is_null()) {
-        j.at("wind_a").get_to(p.winding_annotation);
-    } else {
-        p.winding_annotation = std::nan("");
-    }
-    if (j.contains("creation_time")) {
-        j.at("creation_time").get_to(p.creation_time);
-    } else {
-        p.creation_time = 0;
-    }
-}
- 
-void to_json(json& j, const CollectionMetadata& m) {
-    j = json{
-        {"winding_is_absolute", m.absolute_winding_number}
-    };
-}
- 
-void from_json(const json& j, CollectionMetadata& m) {
-    j.at("winding_is_absolute").get_to(m.absolute_winding_number);
-}
- 
-void to_json(json& j, const VCCollection::Collection& c) {
-   json points_obj = json::object();
-   for(const auto& pair : c.points) {
-       points_obj[std::to_string(pair.first)] = pair.second;
-   }
-
-    j = json{
-        {"name", c.name},
-        {"points", points_obj},
-        {"metadata", c.metadata},
-        {"color", c.color}
-    };
-}
- 
-void from_json(const json& j, VCCollection::Collection& c) {
-    j.at("name").get_to(c.name);
-    
-    json points_obj = j.at("points");
-    if (points_obj.is_object()) {
-        for (auto& [id_str, point_json] : points_obj.items()) {
-            uint64_t id = std::stoull(id_str);
-            ColPoint p = point_json.get<ColPoint>();
-            p.id = id;
-            c.points[id] = p;
-        }
-    }
-
-    j.at("metadata").get_to(c.metadata);
-    j.at("color").get_to(c.color);
-}
- 
 VCCollection::VCCollection(QObject* parent)
     : QObject(parent)
 {

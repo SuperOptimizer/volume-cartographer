@@ -12,7 +12,7 @@
 #include <opencv2/highgui.hpp>
 
 #include <unordered_map>
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 
 void write_overlapping_json(const fs::path& seg_path, const std::set<std::string>& overlapping_names) {
     nlohmann::json overlap_json;

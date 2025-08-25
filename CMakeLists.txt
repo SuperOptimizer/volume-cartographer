@@ -20,7 +20,7 @@ set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
 option(VC_USE_OPENMP "Enable OpenMP support" ON)
 
-set(CMAKE_CXX_FLAGS " -Wno-narrowing -std=c++20 -DWITH_BLOSC=1 -DWITH_ZLIB=1 -g3 -gdwarf-5 -funwind-tables -fasynchronous-unwind-tables" )
+set(CMAKE_CXX_FLAGS " -Wno-narrowing -std=c++20 -DWITH_BLOSC=1 -DWITH_ZLIB=1 -g3 -gdwarf-5 -funwind-tables -fasynchronous-unwind-tables -w " )
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}  -g3 -gdwarf-5 -rdynamic")
 
 if(NOT CMAKE_BUILD_TYPE)

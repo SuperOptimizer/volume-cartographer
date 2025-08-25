@@ -1,4 +1,4 @@
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 
 #include <jxl/codestream_header.h>
 #include <jxl/decode.h>

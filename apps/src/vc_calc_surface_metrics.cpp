@@ -3,7 +3,7 @@
 #include "vc/core/util/Surface.hpp"
 #include <opencv2/imgcodecs.hpp>
 #include <boost/program_options.hpp>
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 #include <iostream>
 #include <fstream>
 

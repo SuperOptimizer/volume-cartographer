@@ -125,7 +125,7 @@ target_link_libraries(vc_render_bench
 ## experiements for flattening ##
 # add_executable(vc_zarralphacomp src/ZarrAlphaComp.cpp)
 # target_link_libraries(vc_zarralphacomp
-#     nlohmann_json::nlohmann_json
+#     glaze::glaze
 #     z5
 #     opencv_highgui
 #     VC::slicing

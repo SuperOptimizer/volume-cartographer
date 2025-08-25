@@ -4,7 +4,7 @@
 #include "vc/core/types/ChunkedTensor.hpp"
 
 #include "z5/factory.hxx"
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
