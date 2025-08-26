@@ -1515,16 +1515,15 @@ QuadSurface *space_tracing_quad_phys(z5::Dataset *ds, float scale, ChunkCache *c
 
     QuadSurface *surf = new QuadSurface(locs, {1/T, 1/T});
 
-    surf->meta = new nlohmann::json;
-    (*surf->meta)["area_vx2"] = area_est_vx2;
-    (*surf->meta)["area_cm2"] = area_est_cm2;
-    (*surf->meta)["max_cost"] = max_cost;
-    (*surf->meta)["avg_cost"] = avg_cost;
-    (*surf->meta)["max_gen"] = generation;
-    (*surf->meta)["gen_avg_cost"] = gen_avg_cost;
-    (*surf->meta)["gen_max_cost"] = gen_max_cost;
-    (*surf->meta)["seed"] = {origin[0],origin[1],origin[2]};
-    (*surf->meta)["elapsed_time_s"] = f_timer.seconds();
+    surf->meta.area_vx2 = area_est_vx2;
+    surf->meta.area_cm2 = area_est_cm2;
+    surf->meta.max_cost = max_cost;
+    surf->meta.avg_cost = avg_cost;
+    surf->meta.max_gen = generation;
+    surf->meta.gen_avg_cost = gen_avg_cost;
+    surf->meta.gen_max_cost = gen_max_cost;
+    surf->meta.seed = {origin[0],origin[1],origin[2]};
+    surf->meta.elapsed_time_s = f_timer.seconds();
 
     return surf;
 }
@@ -2619,9 +2618,9 @@ QuadSurface *grow_surf_from_surfs(SurfaceMeta *seed, const std::vector<SurfaceMe
     std::ofstream approved_log(log_filename);
     
     for(auto &sm : surfs_v) {
-        if (sm->meta->contains("tags") && sm->meta->at("tags").contains("approved"))
+        if (sm->meta.approved)
             approved_sm.insert(sm);
-        if (!sm->meta->contains("tags") || !sm->meta->at("tags").contains("defective")) {            
+        if (!sm->meta.defective) {
             surfs[sm->name()] = sm;
         }
     }

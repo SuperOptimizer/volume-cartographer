@@ -3,7 +3,6 @@
 #include <set>
 
 #include <opencv2/core.hpp> 
-#include <nlohmann/json_fwd.hpp>
 
 #include "SurfaceDef.hpp"
 
@@ -19,6 +18,39 @@ namespace z5 {
 struct Rect3D {
     cv::Vec3f low = {0,0,0};
     cv::Vec3f high = {0,0,0};
+};
+
+struct surface_metadata {
+    float area_vx2;
+    float area_cm2;
+    float max_cost;
+    float avg_cost;
+    int max_gen;
+    std::vector<float> gen_avg_cost;
+    std::vector<float> gen_max_cost;
+    cv::Vec3f seed;
+    float elapsed_time_s;
+    Rect3D bbox;
+    std::string format;
+    std::string type;
+    std::vector<std::string> used_approved_segments;
+    std::string uuid;
+    cv::Vec2f scale;
+    bool approved;
+    std::string approved_user;
+    std::string approved_date;
+    bool defective;
+    std::string defective_user;
+    std::string defective_date;
+    bool reviewed;
+    std::string reviewed_user;
+    std::string reviewed_date;
+    bool revisit;
+    std::string revisit_user;
+    std::string revisit_date;
+    bool partial_review;
+    std::string partial_review_user;
+    std::string partial_review_source;
 };
 
 bool intersect(const Rect3D &a, const Rect3D &b);
@@ -56,7 +88,7 @@ public:
     //coordgenerator relative to ptr&offset
     //needs to be deleted after use
     virtual void gen(cv::Mat_<cv::Vec3f> *coords, cv::Mat_<cv::Vec3f> *normals, cv::Size size, const cv::Vec3f &ptr, float scale, const cv::Vec3f &offset) = 0;
-    nlohmann::json *meta = nullptr;
+    surface_metadata meta;
     std::filesystem::path path;
     SurfaceID id;
 };
@@ -84,7 +116,6 @@ public:
     void setOrigin(cv::Vec3f origin);
     cv::Vec3f origin();
     float scalarp(cv::Vec3f point) const;
-protected:
     void update();
     cv::Vec3f _normal = {0,0,1};
     cv::Vec3f _origin = {0,0,0};
@@ -126,7 +157,6 @@ public:
     friend QuadSurface *smooth_vc_segmentation(QuadSurface *src);
     friend class ControlPointSurface;
     cv::Vec2f _scale;
-protected:
     cv::Mat_<cv::Vec3f>* _points = nullptr;
     cv::Rect _bounds;
     cv::Vec3f _center;
@@ -188,12 +218,13 @@ public:
     RefineCompSurface(z5::Dataset *ds, ChunkCache *cache, QuadSurface *base = nullptr);
     void gen(cv::Mat_<cv::Vec3f> *coords, cv::Mat_<cv::Vec3f> *normals, cv::Size size, const cv::Vec3f &ptr, float scale, const cv::Vec3f &offset) override;
 
+
+protected:
     float start = 0;
     float stop = -100;
     float step = 2.0;
     float low = 0.1;
     float high = 1.0;
-protected:
     z5::Dataset *_ds;
     ChunkCache *_cache;
 };
@@ -202,22 +233,22 @@ class SurfaceMeta
 {
 public:
     SurfaceMeta() {};
-    SurfaceMeta(const std::filesystem::path &path_, const nlohmann::json &json);
+    //SurfaceMeta(const std::filesystem::path &path_, const nlohmann::json &json);
     SurfaceMeta(const std::filesystem::path &path_);
     ~SurfaceMeta();
     void readOverlapping();
     QuadSurface *surface();
     void setSurface(QuadSurface *surf);
     std::string name();
+    surface_metadata meta;
     std::filesystem::path path;
     QuadSurface *_surf = nullptr;
     Rect3D bbox;
-    nlohmann::json *meta = nullptr;
     std::set<std::string> overlapping_str;
     std::set<SurfaceMeta*> overlapping;
 };
 
-Rect3D rect_from_json(const nlohmann::json &json);
+//Rect3D rect_from_json(const nlohmann::json &json);
 bool overlap(SurfaceMeta &a, SurfaceMeta &b, int max_iters = 1000);
 bool contains(SurfaceMeta &a, const cv::Vec3f &loc, int max_iters = 1000);
 bool contains(SurfaceMeta &a, const std::vector<cv::Vec3f> &locs);
@@ -228,7 +259,7 @@ void find_intersect_segments(std::vector<std::vector<cv::Vec3f>> &seg_vol, std::
 
 float min_loc(const cv::Mat_<cv::Vec3f> &points, cv::Vec2f &loc, cv::Vec3f &out, const std::vector<cv::Vec3f> &tgts, const std::vector<float> &tds, PlaneSurface *plane, float init_step = 16.0, float min_step = 0.125);
 
-QuadSurface *grow_surf_from_surfs(SurfaceMeta *seed, const std::vector<SurfaceMeta*> &surfs_v, const nlohmann::json &params, float voxelsize = 1.0);
+//QuadSurface *grow_surf_from_surfs(SurfaceMeta *seed, const std::vector<SurfaceMeta*> &surfs_v, const nlohmann::json &params, float voxelsize = 1.0);
 float pointTo(cv::Vec2f &loc, const cv::Mat_<cv::Vec3d> &points, const cv::Vec3f &tgt, float th, int max_iters, float scale);
 float pointTo(cv::Vec2f &loc, const cv::Mat_<cv::Vec3f> &points, const cv::Vec3f &tgt, float th, int max_iters, float scale);
 

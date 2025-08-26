@@ -1139,8 +1139,8 @@ void CWindow::LoadSurfaces(bool reload)
             auto seg = fVpkg->segmentation(to_load[i].first);
             try {
                 SurfaceMeta *sm = new SurfaceMeta(seg->path());
-                sm->surface();
-                sm->readOverlapping();
+                //sm->surface();
+                //sm->readOverlapping();
                 to_load[i].second = sm;
             } catch (const std::exception& e) {
                 std::cerr << "Failed to load surface " << to_load[i].first << ": " << e.what() << std::endl;
@@ -1152,7 +1152,7 @@ void CWindow::LoadSurfaces(bool reload)
         for(auto &pair : to_load) {
             if (pair.second) {
                 _vol_qsurfs[pair.first] = pair.second;
-                _surf_col->setSurface(pair.first, pair.second->surface(), true);
+                //_surf_col->setSurface(pair.first, pair.second->surface(), true);
             } else {
                 std::cout << "Skipping surface " << pair.first << " due to invalid metadata" << std::endl;
             }
@@ -1360,17 +1360,26 @@ void CWindow::onOpChainChanged(OpChain *chain)
     _surf_col->setSurface("segmentation", chain);
 }
 
-void sync_tag(nlohmann::json &dict, bool checked, std::string name, const std::string& username = "")
+void sync_tag(surface_metadata &dict, bool checked, const std::string& name, const std::string& username = "")
 {
-    if (checked && !dict.count(name)) {
-        dict[name] = nlohmann::json::object();
-        if (!username.empty()) {
-            dict[name]["user"] = username;
-        }
-        dict[name]["date"] = QDateTime::currentDateTime().toString(Qt::ISODate).toStdString();
+    std::string date = QDateTime::currentDateTime().toString(Qt::ISODate).toStdString();
+    if (name == "approved") {
+        dict.approved = checked;
+        dict.approved_date = date;
+        dict.approved_user = username;
+    } else if (name == "defective") {
+        dict.defective = checked;
+        dict.defective_date = date;
+        dict.defective_user = username;
+    } else if (name == "reviewed") {
+        dict.reviewed = checked;
+        dict.reviewed_date = date;
+        dict.reviewed_user = username;
+    } else if (name == "revisit") {
+        dict.revisit = checked;
+        dict.revisit_date = date;
+        dict.revisit_user = username;
     }
-    if (!checked && dict.count(name))
-        dict.erase(name);
 }
 
 void CWindow::onTagChanged(void)
@@ -1394,59 +1403,22 @@ void CWindow::onTagChanged(void)
             surf = _vol_qsurfs[id]->surface();
         }
         
-        if (!surf || !surf->meta) {
+        if (!surf) {
             continue;
         }
         
         // Track if reviewed status changed from unchecked to checked
-        bool wasReviewed = surf->meta->contains("tags") && 
-                          surf->meta->at("tags").contains("reviewed");
+        bool wasReviewed = surf->meta.reviewed;
         bool isNowReviewed = _chkReviewed->checkState() == Qt::Checked;
         bool reviewedJustAdded = !wasReviewed && isNowReviewed;
         
-        if (surf->meta->contains("tags")) {
-            sync_tag(surf->meta->at("tags"), _chkApproved->checkState() == Qt::Checked, "approved", username);
-            sync_tag(surf->meta->at("tags"), _chkDefective->checkState() == Qt::Checked, "defective", username);
-            sync_tag(surf->meta->at("tags"), _chkReviewed->checkState() == Qt::Checked, "reviewed", username);
-            sync_tag(surf->meta->at("tags"), _chkRevisit->checkState() == Qt::Checked, "revisit", username);
-            surf->save_meta();
-        }
-        else if (_chkApproved->checkState() || _chkDefective->checkState() || _chkReviewed->checkState() || _chkRevisit->checkState()) {
-            surf->meta->push_back({"tags", nlohmann::json::object()});
-            if (_chkApproved->checkState()) {
-                if (!username.empty()) {
-                    surf->meta->at("tags")["approved"] = nlohmann::json::object();
-                    surf->meta->at("tags")["approved"]["user"] = username;
-                } else {
-                    surf->meta->at("tags")["approved"] = nullptr;
-                }
-            }
-            if (_chkDefective->checkState()) {
-                if (!username.empty()) {
-                    surf->meta->at("tags")["defective"] = nlohmann::json::object();
-                    surf->meta->at("tags")["defective"]["user"] = username;
-                } else {
-                    surf->meta->at("tags")["defective"] = nullptr;
-                }
-            }
-            if (_chkReviewed->checkState()) {
-                if (!username.empty()) {
-                    surf->meta->at("tags")["reviewed"] = nlohmann::json::object();
-                    surf->meta->at("tags")["reviewed"]["user"] = username;
-                } else {
-                    surf->meta->at("tags")["reviewed"] = nullptr;
-                }
-            }
-            if (_chkRevisit->checkState()) {
-                if (!username.empty()) {
-                    surf->meta->at("tags")["revisit"] = nlohmann::json::object();
-                    surf->meta->at("tags")["revisit"]["user"] = username;
-                } else {
-                    surf->meta->at("tags")["revisit"] = nullptr;
-                }
-            }
-            surf->save_meta();
-        }
+        sync_tag(surf->meta, _chkApproved->checkState() == Qt::Checked, "approved", username);
+        sync_tag(surf->meta, _chkDefective->checkState() == Qt::Checked, "defective", username);
+        sync_tag(surf->meta, _chkReviewed->checkState() == Qt::Checked, "reviewed", username);
+        sync_tag(surf->meta, _chkRevisit->checkState() == Qt::Checked, "revisit", username);
+        surf->save_meta();
+
+
         
         // If reviewed was just added, mark overlapping segmentations with partial_review
         if (reviewedJustAdded && _vol_qsurfs.count(id)) {
@@ -1628,15 +1600,16 @@ void CWindow::UpdateSurfaceTreeIcon(SurfaceTreeWidgetItem *item)
     std::string id = item->data(SURFACE_ID_COLUMN, Qt::UserRole).toString().toStdString();
 
     // Approved / defective icon
-    if (_vol_qsurfs[id]->surface()->meta) {
-        item->updateItemIcon(
-            _vol_qsurfs[id]->surface()->meta->value("tags", nlohmann::json::object_t()).count("approved"),
-            _vol_qsurfs[id]->surface()->meta->value("tags", nlohmann::json::object_t()).count("defective"));
-    }
+    //if (_vol_qsurfs[id]->surface()->meta) {
+    //    item->updateItemIcon(
+    //        _vol_qsurfs[id]->surface()->meta->value("tags", nlohmann::json::object_t()).count("approved"),
+    //        _vol_qsurfs[id]->surface()->meta->value("tags", nlohmann::json::object_t()).count("defective"));
+    //}
 }
 
 void CWindow::onSegFilterChanged(int index)
 {
+    return;
     if (!fVpkg) {
         return;
     }
@@ -2129,12 +2102,12 @@ void CWindow::AddSingleSegmentation(const std::string& segId)
         auto seg = fVpkg->segmentation(segId);
         if (seg->metadata().hasKey("format") && seg->metadata().get<std::string>("format") == "tifxyz") {
             SurfaceMeta *sm = new SurfaceMeta(seg->path());
-            sm->surface();
-            sm->readOverlapping();
+            //sm->surface();
+            //sm->readOverlapping();
             
             // Add to collections
             _vol_qsurfs[segId] = sm;
-            _surf_col->setSurface(segId, sm->surface(), true);
+            //_surf_col->setSurface(segId, sm->surface(), true);
             
             // Add to tree widget
             auto* item = new SurfaceTreeWidgetItem(treeWidgetSurfaces);
@@ -2254,6 +2227,7 @@ void CWindow::LoadSurfacesIncremental()
 
 void CWindow::onGenerateReviewReport()
 {
+    return;
     if (!fVpkg) {
         QMessageBox::warning(this, tr("Error"), tr("No volume package loaded."));
         return;
