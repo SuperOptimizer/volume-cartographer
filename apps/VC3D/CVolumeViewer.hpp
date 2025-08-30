@@ -229,5 +229,19 @@ protected:
 
     bool _useFastInterpolation;
 
+    bool _showOverlaps = true;
+    QPointF _lastMousePos;
+    std::map<std::string, cv::Mat_<uint8_t>> _overlapMasks;  // segmentId -> mask
+    std::map<std::string, QGraphicsPixmapItem*> _overlapOverlays;  // segmentId -> overlay item
+    std::set<std::string> _activeOverlaps;  // Currently visible overlaps under cursor
+
+    void loadOverlapMasks();
+    void updateOverlapHighlight(const QPointF& scenePos);
+
+    void createOverlayForSegment(const std::string &segId);
+
+    void clearOverlapOverlays();
+    QColor getSegmentColor(const std::string& uuid);
+
 
 };  // class CVolumeViewer

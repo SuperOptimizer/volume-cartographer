@@ -14,6 +14,7 @@
 #include "vc/core/util/Slicing.hpp"
 
 #include <omp.h>
+#include <opencv2/imgcodecs.hpp>
 
 #include "OpChain.hpp"
 
@@ -296,6 +297,10 @@ void CVolumeViewer::onCursorMove(QPointF scene_loc)
                 renderOrUpdatePoint(*new_point);
             }
         }
+    }
+
+    if (_showOverlaps && _surf_name == "segmentation") {
+        updateOverlapHighlight(scene_loc);
     }
 }
 
@@ -649,6 +654,10 @@ void CVolumeViewer::onSurfaceChanged(std::string name, Surface *surf)
     if (name == _surf_name) {
         curr_img_area = {0,0,0,0};
         renderVisible(true); // Immediate render of slice
+    }
+
+    if (name == "segmentation" && surf) {
+        loadOverlapMasks();
     }
 
     // Defer overlay updates
@@ -2315,4 +2324,170 @@ void CVolumeViewer::renderDirectionHints()
         setOverlayGroup("direction_hints", items);
         return;
     }
+}
+
+void CVolumeViewer::loadOverlapMasks()
+{
+    clearOverlapOverlays();
+    _overlapMasks.clear();
+
+    if (!_surf || _surf_name != "segmentation") return;
+
+    // Get the metadata for current surface
+    auto* quad = dynamic_cast<QuadSurface*>(_surf);
+    if (!quad || !quad->meta) return;
+
+    // Parse overlapping segments from metadata
+    //if (!quad->meta->contains("overlapping")) return;
+
+    std::filesystem::path basePath = quad->path.parent_path().parent_path(); // Go up to paths/
+
+
+    auto overlapping = read_overlapping_json(quad->path);
+    std::cout << overlapping.size() << std::endl;
+
+    for (const auto& id : overlapping) {
+        //if (!segId.is_string()) continue;
+        //std::string id = segId.get<std::string>();
+
+        // Load mask.tif for this overlapping segment
+        std::filesystem::path maskPath = basePath / id / "mask.tif";
+        if (std::filesystem::exists(maskPath)) {
+            cv::Mat mask = cv::imread(maskPath.string(), cv::IMREAD_GRAYSCALE);
+            if (!mask.empty()) {
+                _overlapMasks[id] = mask;
+                std::cout << "Loaded overlap mask for " << id << " size: " << mask.cols << "x" << mask.rows << std::endl;
+            }
+        }
+    }
+}
+
+QColor CVolumeViewer::getSegmentColor(const std::string& uuid)
+{
+    // Generate deterministic color from UUID
+    std::hash<std::string> hasher;
+    size_t hash = hasher(uuid);
+
+    // Use hash to generate HSV color with good contrast
+    int hue = (hash % 360);
+    int saturation = 150 + (hash / 360) % 100;  // 150-250 range
+    int value = 180 + (hash / 360 / 100) % 75;  // 180-255 range
+
+    return QColor::fromHsv(hue, saturation, value);
+}
+
+void CVolumeViewer::updateOverlapHighlight(const QPointF& scenePos)
+{
+    if (!_showOverlaps || !_surf || _surf_name != "segmentation") {
+        clearOverlapOverlays();
+        return;
+    }
+
+    auto* quad = dynamic_cast<QuadSurface*>(_surf);
+    if (!quad) return;
+
+    // Convert scene position to surface coordinates
+    cv::Vec2f surfCoord(scenePos.x() / _scale, scenePos.y() / _scale);
+
+    // Map to surface grid indices
+    cv::Vec2f sc = quad->scale();
+    int cols = quad->rawPoints().cols;
+    int rows = quad->rawPoints().rows;
+    int i = std::round(cols * 0.5 + surfCoord[0] * sc[0]);
+    int j = std::round(rows * 0.5 + surfCoord[1] * sc[1]);
+
+    // Find which overlaps contain this point
+    std::set<std::string> newActiveOverlaps;
+
+    for (const auto& [segId, mask] : _overlapMasks) {
+        // Check if mask dimensions match (accounting for scaling)
+        // Assuming mask is at 0.25 scale relative to surface
+        int mask_i = i / 4;
+        int mask_j = j / 4;
+
+        if (mask_i >= 0 && mask_i < mask.cols &&
+            mask_j >= 0 && mask_j < mask.rows) {
+            if (mask(mask_j, mask_i) > 128) {  // Threshold for mask
+                newActiveOverlaps.insert(segId);
+            }
+        }
+    }
+
+    // Update overlays if active set changed
+    if (newActiveOverlaps != _activeOverlaps) {
+        _activeOverlaps = newActiveOverlaps;
+
+        // Clear old overlays
+        for (auto& [id, item] : _overlapOverlays) {
+            if (item) {
+                item->setVisible(_activeOverlaps.count(id) > 0);
+            }
+        }
+
+        // Create new overlays as needed
+        for (const auto& segId : _activeOverlaps) {
+            if (_overlapOverlays.count(segId) == 0 && _overlapMasks.count(segId)) {
+                createOverlayForSegment(segId);
+            }
+        }
+    }
+}
+
+void CVolumeViewer::createOverlayForSegment(const std::string& segId)
+{
+    if (!_overlapMasks.count(segId)) return;
+
+    const cv::Mat_<uint8_t>& mask = _overlapMasks[segId];
+    QColor color = getSegmentColor(segId);
+    color.setAlpha(100);  // Semi-transparent
+
+    // Create colored overlay from mask
+    QImage overlay(mask.cols, mask.rows, QImage::Format_ARGB32);
+    overlay.fill(Qt::transparent);
+
+    for (int y = 0; y < mask.rows; ++y) {
+        for (int x = 0; x < mask.cols; ++x) {
+            if (mask(y, x) > 128) {
+                overlay.setPixelColor(x, y, color);
+            }
+        }
+    }
+
+    // Scale up to match surface display scale
+    QImage scaled = overlay.scaled(
+        mask.cols * 4 * _scale,  // Assuming 4x scale factor
+        mask.rows * 4 * _scale,
+        Qt::KeepAspectRatio,
+        Qt::FastTransformation
+    );
+
+    QPixmap pixmap = QPixmap::fromImage(scaled);
+    QGraphicsPixmapItem* item = fScene->addPixmap(pixmap);
+
+    // Position the overlay correctly
+    auto* quad = dynamic_cast<QuadSurface*>(_surf);
+    if (quad) {
+        // Calculate offset based on surface bounds
+        cv::Vec2f sc = quad->scale();
+        float offsetX = -quad->rawPoints().cols * 0.5 / sc[0] * _scale;
+        float offsetY = -quad->rawPoints().rows * 0.5 / sc[1] * _scale;
+        item->setPos(offsetX, offsetY);
+    }
+
+    item->setZValue(50);  // Above base image but below UI elements
+    item->setOpacity(0.4);
+
+    _overlapOverlays[segId] = item;
+}
+
+void CVolumeViewer::clearOverlapOverlays()
+{
+    for (auto& [id, item] : _overlapOverlays) {
+        if (item) {
+            fScene->removeItem(item);
+            delete item;
+        }
+    }
+    _overlapOverlays.clear();
+    _activeOverlaps.clear();
 }
