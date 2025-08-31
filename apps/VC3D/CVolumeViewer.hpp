@@ -242,6 +242,7 @@ protected:
 
     void clearOverlapOverlays();
     QColor getSegmentColor(const std::string& uuid);
+    void updateOverlayScales();
 
 
 };  // class CVolumeViewer

@@ -385,6 +385,7 @@ void CVolumeViewer::onZoom(int steps, QPointF scene_loc, Qt::KeyboardModifiers m
         }
         renderVisible();
         updateSelectionGraphics();
+        updateOverlayScales();
     }
 
     _lbl->setText(QString("%1x %2").arg(_scale).arg(_z_off));
@@ -2436,40 +2437,35 @@ void CVolumeViewer::createOverlayForSegment(const std::string& segId)
     QColor color = getSegmentColor(segId);
     color.setAlpha(200);  // Semi-transparent
 
-    // Create colored overlay from mask
-    QImage overlay(mask.cols, mask.rows, QImage::Format_ARGB32);
+    // Create colored overlay from mask at base resolution
+    QImage overlay(mask.cols * 4, mask.rows * 4, QImage::Format_ARGB32);
     overlay.fill(Qt::transparent);
 
-    for (int y = 0; y < mask.rows; ++y) {
-        for (int x = 0; x < mask.cols; ++x) {
-            if (mask(y, x) > 128) {
+    // Scale up the mask to base resolution (4x)
+    for (int y = 0; y < mask.rows * 4; ++y) {
+        for (int x = 0; x < mask.cols * 4; ++x) {
+            int mask_x = x / 4;
+            int mask_y = y / 4;
+            if (mask_x < mask.cols && mask_y < mask.rows && mask(mask_y, mask_x) > 128) {
                 overlay.setPixelColor(x, y, color);
             }
         }
     }
 
-    // Scale up to match surface display scale
-    QImage scaled = overlay.scaled(
-        mask.cols * 4 * _scale,  // Assuming 4x scale factor
-        mask.rows * 4 * _scale,
-        Qt::KeepAspectRatio,
-        Qt::FastTransformation
-    );
-
-    QPixmap pixmap = QPixmap::fromImage(scaled);
+    QPixmap pixmap = QPixmap::fromImage(overlay);
     QGraphicsPixmapItem* item = fScene->addPixmap(pixmap);
 
-    // Position the overlay correctly
+    // Position and scale the overlay
     auto* quad = dynamic_cast<QuadSurface*>(_surf);
     if (quad) {
-        // Calculate offset based on surface bounds
         cv::Vec2f sc = quad->scale();
-        float offsetX = -quad->rawPoints().cols * 0.5 / sc[0] * _scale;
-        float offsetY = -quad->rawPoints().rows * 0.5 / sc[1] * _scale;
-        item->setPos(offsetX, offsetY);
+        float offsetX = -quad->rawPoints().cols * 0.5 / sc[0];
+        float offsetY = -quad->rawPoints().rows * 0.5 / sc[1];
+        item->setPos(offsetX * _scale, offsetY * _scale);
+        item->setScale(_scale);  // Apply current scale as transform
     }
 
-    item->setZValue(50);  // Above base image but below UI elements
+    item->setZValue(50);
     item->setOpacity(0.4);
 
     _overlapOverlays[segId] = item;
@@ -2485,4 +2481,21 @@ void CVolumeViewer::clearOverlapOverlays()
     }
     _overlapOverlays.clear();
     _activeOverlaps.clear();
+}
+
+void CVolumeViewer::updateOverlayScales()
+{
+    auto* quad = dynamic_cast<QuadSurface*>(_surf);
+    if (!quad) return;
+
+    cv::Vec2f sc = quad->scale();
+    float offsetX = -quad->rawPoints().cols * 0.5 / sc[0];
+    float offsetY = -quad->rawPoints().rows * 0.5 / sc[1];
+
+    for (auto& [id, item] : _overlapOverlays) {
+        if (item) {
+            item->setPos(offsetX * _scale, offsetY * _scale);
+            item->setScale(_scale);
+        }
+    }
 }
