@@ -2331,6 +2331,7 @@ void CVolumeViewer::loadOverlapMasks()
 {
     clearOverlapOverlays();
     _overlapMasks.clear();
+    _overlapSegments.clear();  // Add this to store segment surfaces
 
     if (!_surf || _surf_name != "segmentation") return;
 
@@ -2338,21 +2339,30 @@ void CVolumeViewer::loadOverlapMasks()
     if (!quad || !quad->meta) return;
 
     std::filesystem::path basePath = quad->path.parent_path();
-
     auto overlapping = read_overlapping_json(quad->path);
-    std::cout << overlapping.size() << std::endl;
 
     for (const auto& id : overlapping) {
-        if (std::filesystem::path maskPath = basePath / id / "mask.tif"; std::filesystem::exists(maskPath)) {
+        std::filesystem::path segPath = basePath / id;
+
+        // Load the mask
+        if (std::filesystem::path maskPath = segPath / "mask.tif"; std::filesystem::exists(maskPath)) {
             std::vector<cv::Mat> layers;
-            if (bool success = cv::imreadmulti(maskPath.string(), layers, cv::IMREAD_UNCHANGED); success && !layers.empty()) {
-                // Get the first layer (index 0) which is the binary mask
+            if (cv::imreadmulti(maskPath.string(), layers, cv::IMREAD_UNCHANGED) && !layers.empty()) {
                 if (cv::Mat_<uint8_t> mask = layers[0]; !mask.empty()) {
                     _overlapMasks[id] = mask;
-                    std::cout << "Loaded overlap mask for " << id << " size: " << mask.cols << "x" << mask.rows << std::endl;
+
+                    // Load the segment's surface to get its actual position
+                    try {
+                        QuadSurface* segSurface = load_quad_from_tifxyz(segPath.string());
+                        if (segSurface) {
+                            _overlapSegments[id] = segSurface;
+                            std::cout << "Loaded segment " << id << " with bbox: "
+                                     << segSurface->bbox().low << " to " << segSurface->bbox().high << std::endl;
+                        }
+                    } catch (const std::exception& e) {
+                        std::cout << "Failed to load surface for " << id << ": " << e.what() << std::endl;
+                    }
                 }
-            } else {
-                std::cout << "Failed to load multi-layer TIFF for " << id << std::endl;
             }
         }
     }
@@ -2382,38 +2392,37 @@ void CVolumeViewer::updateOverlapHighlight(const QPointF& scenePos)
     auto* quad = dynamic_cast<QuadSurface*>(_surf);
     if (!quad) return;
 
-    // Convert scene position to surface coordinates
-    cv::Vec2f surfCoord(scenePos.x() / _scale, scenePos.y() / _scale);
+    // Convert scene position to volume coordinates
+    cv::Vec3f p, n;
+    if (!scene2vol(p, n, _surf, _surf_name, _surf_col, scenePos, _vis_center, _scale)) {
+        return;
+    }
 
-    // Map to surface grid indices
-    cv::Vec2f sc = quad->scale();
-    int cols = quad->rawPoints().cols;
-    int rows = quad->rawPoints().rows;
-    int i = std::round(cols * 0.5 + surfCoord[0] * sc[0]);
-    int j = std::round(rows * 0.5 + surfCoord[1] * sc[1]);
-
-    // Find which overlaps contain this point
+    // Find which overlaps contain this 3D point
     std::set<std::string> newActiveOverlaps;
 
-    for (const auto& [segId, mask] : _overlapMasks) {
-        // Check if mask dimensions match (accounting for scaling)
-        // Assuming mask is at 0.25 scale relative to surface
-        int mask_i = i / 4;
-        int mask_j = j / 4;
+    for (const auto& [segId, segSurface] : _overlapSegments) {
+        // Check if point is within segment's bounding box
+        Rect3D bbox = segSurface->bbox();
+        if (p[0] >= bbox.low[0] && p[0] <= bbox.high[0] &&
+            p[1] >= bbox.low[1] && p[1] <= bbox.high[1] &&
+            p[2] >= bbox.low[2] && p[2] <= bbox.high[2]) {
 
-        if (mask_i >= 0 && mask_i < mask.cols &&
-            mask_j >= 0 && mask_j < mask.rows) {
-            if (mask(mask_j, mask_i) > 128) {  // Threshold for mask
+            // Check if point is actually on the segment surface
+            cv::Vec3f segPtr = segSurface->pointer();
+            float dist = segSurface->pointTo(segPtr, p, 2.0, 100);
+
+            if (dist >= 0 && dist <= 2.0) {
                 newActiveOverlaps.insert(segId);
             }
-        }
+            }
     }
 
     // Update overlays if active set changed
     if (newActiveOverlaps != _activeOverlaps) {
         _activeOverlaps = newActiveOverlaps;
 
-        // Clear old overlays
+        // Update visibility
         for (auto& [id, item] : _overlapOverlays) {
             if (item) {
                 item->setVisible(_activeOverlaps.count(id) > 0);
@@ -2422,7 +2431,7 @@ void CVolumeViewer::updateOverlapHighlight(const QPointF& scenePos)
 
         // Create new overlays as needed
         for (const auto& segId : _activeOverlaps) {
-            if (_overlapOverlays.count(segId) == 0 && _overlapMasks.count(segId)) {
+            if (_overlapOverlays.count(segId) == 0) {
                 createOverlayForSegment(segId);
             }
         }
@@ -2431,17 +2440,21 @@ void CVolumeViewer::updateOverlapHighlight(const QPointF& scenePos)
 
 void CVolumeViewer::createOverlayForSegment(const std::string& segId)
 {
-    if (!_overlapMasks.count(segId)) return;
+    if (!_overlapMasks.count(segId) || !_overlapSegments.count(segId)) return;
+
+    auto* mainQuad = dynamic_cast<QuadSurface*>(_surf);
+    if (!mainQuad) return;
 
     const cv::Mat_<uint8_t>& mask = _overlapMasks[segId];
-    QColor color = getSegmentColor(segId);
-    color.setAlpha(200);  // Semi-transparent
+    QuadSurface* segSurface = _overlapSegments[segId];
 
-    // Create colored overlay from mask at base resolution
+    QColor color = getSegmentColor(segId);
+    color.setAlpha(200);
+
+    // Create colored overlay at base resolution
     QImage overlay(mask.cols * 4, mask.rows * 4, QImage::Format_ARGB32);
     overlay.fill(Qt::transparent);
 
-    // Scale up the mask to base resolution (4x)
     for (int y = 0; y < mask.rows * 4; ++y) {
         for (int x = 0; x < mask.cols * 4; ++x) {
             int mask_x = x / 4;
@@ -2455,19 +2468,32 @@ void CVolumeViewer::createOverlayForSegment(const std::string& segId)
     QPixmap pixmap = QPixmap::fromImage(overlay);
     QGraphicsPixmapItem* item = fScene->addPixmap(pixmap);
 
-    // Position and scale the overlay
-    auto* quad = dynamic_cast<QuadSurface*>(_surf);
-    if (quad) {
-        cv::Vec2f sc = quad->scale();
-        float offsetX = -quad->rawPoints().cols * 0.5 / sc[0];
-        float offsetY = -quad->rawPoints().rows * 0.5 / sc[1];
-        item->setPos(offsetX * _scale, offsetY * _scale);
-        item->setScale(_scale);  // Apply current scale as transform
+    // Get the center of the segment's bounding box
+    Rect3D segBbox = segSurface->bbox();
+    cv::Vec3f segCenter = (segBbox.low + segBbox.high) * 0.5f;
+
+    // Map the segment's center to the main surface coordinates
+    auto ptr = mainQuad->pointer();
+    float dist = mainQuad->pointTo(ptr, segCenter, 10.0, 100);
+
+    if (dist < 10.0) {
+        // Get the location in surface coordinates
+        cv::Vec3f surfLoc = mainQuad->loc(ptr);
+
+        // Position the overlay centered at this location
+        float overlayWidth = mask.cols * 4;
+        float overlayHeight = mask.rows * 4;
+
+        item->setPos((surfLoc[0] - overlayWidth/2) * _scale,
+                    (surfLoc[1] - overlayHeight/2) * _scale);
+        item->setScale(_scale);
+    } else {
+        // If we can't map it, hide it
+        item->setVisible(false);
     }
 
     item->setZValue(50);
     item->setOpacity(0.4);
-
     _overlapOverlays[segId] = item;
 }
 
@@ -2480,6 +2506,14 @@ void CVolumeViewer::clearOverlapOverlays()
         }
     }
     _overlapOverlays.clear();
+
+    for (auto& [id, surface] : _overlapSegments) {
+        if (surface) {
+            delete surface;
+        }
+    }
+    _overlapSegments.clear();
+
     _activeOverlaps.clear();
 }
 
@@ -2488,14 +2522,26 @@ void CVolumeViewer::updateOverlayScales()
     auto* quad = dynamic_cast<QuadSurface*>(_surf);
     if (!quad) return;
 
-    cv::Vec2f sc = quad->scale();
-    float offsetX = -quad->rawPoints().cols * 0.5 / sc[0];
-    float offsetY = -quad->rawPoints().rows * 0.5 / sc[1];
-
     for (auto& [id, item] : _overlapOverlays) {
-        if (item) {
-            item->setPos(offsetX * _scale, offsetY * _scale);
-            item->setScale(_scale);
+        if (item && _overlapSegments.count(id)) {
+            QuadSurface* segSurface = _overlapSegments[id];
+
+            // Recalculate position at new scale
+            Rect3D segBbox = segSurface->bbox();
+            cv::Vec3f segCenter = (segBbox.low + segBbox.high) * 0.5f;
+
+            auto ptr = quad->pointer();
+            float dist = quad->pointTo(ptr, segCenter, 10.0, 100);
+
+            if (dist < 10.0) {
+                cv::Vec3f surfLoc = quad->loc(ptr);
+                float overlayWidth = _overlapMasks[id].cols * 4;
+                float overlayHeight = _overlapMasks[id].rows * 4;
+
+                item->setPos((surfLoc[0] - overlayWidth/2) * _scale,
+                            (surfLoc[1] - overlayHeight/2) * _scale);
+                item->setScale(_scale);
+            }
         }
     }
 }

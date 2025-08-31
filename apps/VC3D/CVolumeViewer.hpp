@@ -234,7 +234,8 @@ protected:
     std::map<std::string, cv::Mat_<uint8_t>> _overlapMasks;  // segmentId -> mask
     std::map<std::string, QGraphicsPixmapItem*> _overlapOverlays;  // segmentId -> overlay item
     std::set<std::string> _activeOverlaps;  // Currently visible overlaps under cursor
-
+    std::map<std::string, std::pair<cv::Vec3f, cv::Vec3f>> _overlapBounds;  // segmentId -> (min, max) bounds
+    std::map<std::string, QuadSurface*> _overlapSegments;  // segmentId -> segment surface
     void loadOverlapMasks();
     void updateOverlapHighlight(const QPointF& scenePos);
 
