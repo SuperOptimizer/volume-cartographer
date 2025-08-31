@@ -2333,30 +2333,25 @@ void CVolumeViewer::loadOverlapMasks()
 
     if (!_surf || _surf_name != "segmentation") return;
 
-    // Get the metadata for current surface
     auto* quad = dynamic_cast<QuadSurface*>(_surf);
     if (!quad || !quad->meta) return;
 
-    // Parse overlapping segments from metadata
-    //if (!quad->meta->contains("overlapping")) return;
-
-    std::filesystem::path basePath = quad->path.parent_path().parent_path(); // Go up to paths/
-
+    std::filesystem::path basePath = quad->path.parent_path();
 
     auto overlapping = read_overlapping_json(quad->path);
     std::cout << overlapping.size() << std::endl;
 
     for (const auto& id : overlapping) {
-        //if (!segId.is_string()) continue;
-        //std::string id = segId.get<std::string>();
-
-        // Load mask.tif for this overlapping segment
-        std::filesystem::path maskPath = basePath / id / "mask.tif";
-        if (std::filesystem::exists(maskPath)) {
-            cv::Mat mask = cv::imread(maskPath.string(), cv::IMREAD_GRAYSCALE);
-            if (!mask.empty()) {
-                _overlapMasks[id] = mask;
-                std::cout << "Loaded overlap mask for " << id << " size: " << mask.cols << "x" << mask.rows << std::endl;
+        if (std::filesystem::path maskPath = basePath / id / "mask.tif"; std::filesystem::exists(maskPath)) {
+            std::vector<cv::Mat> layers;
+            if (bool success = cv::imreadmulti(maskPath.string(), layers, cv::IMREAD_UNCHANGED); success && !layers.empty()) {
+                // Get the first layer (index 0) which is the binary mask
+                if (cv::Mat_<uint8_t> mask = layers[0]; !mask.empty()) {
+                    _overlapMasks[id] = mask;
+                    std::cout << "Loaded overlap mask for " << id << " size: " << mask.cols << "x" << mask.rows << std::endl;
+                }
+            } else {
+                std::cout << "Failed to load multi-layer TIFF for " << id << std::endl;
             }
         }
     }
@@ -2439,7 +2434,7 @@ void CVolumeViewer::createOverlayForSegment(const std::string& segId)
 
     const cv::Mat_<uint8_t>& mask = _overlapMasks[segId];
     QColor color = getSegmentColor(segId);
-    color.setAlpha(100);  // Semi-transparent
+    color.setAlpha(200);  // Semi-transparent
 
     // Create colored overlay from mask
     QImage overlay(mask.cols, mask.rows, QImage::Format_ARGB32);

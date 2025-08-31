@@ -58,11 +58,7 @@ add_executable(vc_render_bench src/ZarrExtract.cpp)
 target_link_libraries(vc_render_bench vc_core)
 
 add_executable(vc_create_segment_mask src/vc_create_segment_mask.cpp)
-target_link_libraries(vc_create_segment_mask
-        VC::metrics
-        VC::surface
-        Boost::program_options
-)
+target_link_libraries(vc_create_segment_mask vc_core Boost::program_options)
 
 
 ## experiements for flattening ##
