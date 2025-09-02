@@ -2451,14 +2451,22 @@ void CVolumeViewer::createOverlayForSegment(const std::string& segId)
     QColor color = getSegmentColor(segId);
     color.setAlpha(200);
 
-    // Create colored overlay at base resolution
-    QImage overlay(mask.cols * 4, mask.rows * 4, QImage::Format_ARGB32);
+    // Scale the overlay image to match current zoom
+    // The mask is at 0.25x resolution (based on the 4x scaling in the original code)
+    // So we need to scale it up by 4 * _scale
+    float overlayScale = 4.0f * _scale;
+    int scaledWidth = mask.cols * overlayScale;
+    int scaledHeight = mask.rows * overlayScale;
+
+    // Create overlay at scaled resolution
+    QImage overlay(scaledWidth, scaledHeight, QImage::Format_ARGB32);
     overlay.fill(Qt::transparent);
 
-    for (int y = 0; y < mask.rows * 4; ++y) {
-        for (int x = 0; x < mask.cols * 4; ++x) {
-            int mask_x = x / 4;
-            int mask_y = y / 4;
+    // Fill the scaled overlay
+    for (int y = 0; y < scaledHeight; ++y) {
+        for (int x = 0; x < scaledWidth; ++x) {
+            int mask_x = x / overlayScale;
+            int mask_y = y / overlayScale;
             if (mask_x < mask.cols && mask_y < mask.rows && mask(mask_y, mask_x) > 128) {
                 overlay.setPixelColor(x, y, color);
             }
@@ -2468,27 +2476,23 @@ void CVolumeViewer::createOverlayForSegment(const std::string& segId)
     QPixmap pixmap = QPixmap::fromImage(overlay);
     QGraphicsPixmapItem* item = fScene->addPixmap(pixmap);
 
-    // Get the center of the segment's bounding box
+    // Position based on segment center
     Rect3D segBbox = segSurface->bbox();
     cv::Vec3f segCenter = (segBbox.low + segBbox.high) * 0.5f;
 
-    // Map the segment's center to the main surface coordinates
     auto ptr = mainQuad->pointer();
     float dist = mainQuad->pointTo(ptr, segCenter, 10.0, 100);
 
     if (dist < 10.0) {
-        // Get the location in surface coordinates
         cv::Vec3f surfLoc = mainQuad->loc(ptr);
 
-        // Position the overlay centered at this location
-        float overlayWidth = mask.cols * 4;
-        float overlayHeight = mask.rows * 4;
+        // Position in scene coordinates
+        float sceneX = surfLoc[0] * _scale - scaledWidth / 2.0f;
+        float sceneY = surfLoc[1] * _scale - scaledHeight / 2.0f;
 
-        item->setPos((surfLoc[0] - overlayWidth/2) * _scale,
-                    (surfLoc[1] - overlayHeight/2) * _scale);
-        item->setScale(_scale);
+        item->setPos(sceneX, sceneY);
+        // No setScale needed - the pixmap is already at the right size
     } else {
-        // If we can't map it, hide it
         item->setVisible(false);
     }
 
@@ -2519,29 +2523,17 @@ void CVolumeViewer::clearOverlapOverlays()
 
 void CVolumeViewer::updateOverlayScales()
 {
-    auto* quad = dynamic_cast<QuadSurface*>(_surf);
-    if (!quad) return;
-
+    // Clear all existing overlays
     for (auto& [id, item] : _overlapOverlays) {
-        if (item && _overlapSegments.count(id)) {
-            QuadSurface* segSurface = _overlapSegments[id];
-
-            // Recalculate position at new scale
-            Rect3D segBbox = segSurface->bbox();
-            cv::Vec3f segCenter = (segBbox.low + segBbox.high) * 0.5f;
-
-            auto ptr = quad->pointer();
-            float dist = quad->pointTo(ptr, segCenter, 10.0, 100);
-
-            if (dist < 10.0) {
-                cv::Vec3f surfLoc = quad->loc(ptr);
-                float overlayWidth = _overlapMasks[id].cols * 4;
-                float overlayHeight = _overlapMasks[id].rows * 4;
-
-                item->setPos((surfLoc[0] - overlayWidth/2) * _scale,
-                            (surfLoc[1] - overlayHeight/2) * _scale);
-                item->setScale(_scale);
-            }
+        if (item) {
+            fScene->removeItem(item);
+            delete item;
         }
+    }
+    _overlapOverlays.clear();
+
+    // Recreate overlays for active segments at new scale
+    for (const auto& segId : _activeOverlaps) {
+        createOverlayForSegment(segId);
     }
 }

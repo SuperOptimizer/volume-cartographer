@@ -232,6 +232,5 @@ QuadSurface* surface_intersection(QuadSurface* a, QuadSurface* b, float toleranc
 void generate_mask(QuadSurface* surf,
                             cv::Mat_<uint8_t>& mask,
                             cv::Mat_<uint8_t>& img,
-                            z5::Dataset* ds_high = nullptr,
-                            z5::Dataset* ds_low = nullptr,
+                            z5::Dataset* ds_mid = nullptr,
                             ChunkCache* cache = nullptr);

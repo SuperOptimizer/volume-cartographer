@@ -11,6 +11,7 @@ int main(int argc, char *argv[])
     if (argc < 2) {
         std::cout << "usage: " << argv[0] << " <tiffxyz-segment> [zarr-volume] [output-mask-path] [--overwrite]" << std::endl;
         std::cout << "  Generates a mask (and optionally image layer if volume provided)" << std::endl;
+        std::cout << "  Uses 2x downscaled volume (level 1) for image generation" << std::endl;
         std::cout << "  --overwrite: overwrite existing mask file (defaults to false)" << std::endl;
         return EXIT_SUCCESS;
     }
@@ -62,9 +63,9 @@ int main(int argc, char *argv[])
             volume = Volume::New(volume_path);
             cache = new ChunkCache(1ULL * 1024ULL * 1024ULL * 1024ULL);
 
+            // Use volume level 1 (2x downscaled)
             generate_mask(surf, mask, img,
-                         volume->zarrDataset(0),
-                         volume->zarrDataset(2),
+                         volume->zarrDataset(1),  // Changed to use level 1
                          cache);
 
             // Save as multi-layer TIFF
@@ -86,7 +87,7 @@ int main(int argc, char *argv[])
         }
     } else {
         // Generate mask only
-        generate_mask(surf, mask, img);
+        generate_mask(surf, mask, img, nullptr, nullptr);
 
         if (!cv::imwrite(mask_path.string(), mask)) {
             std::cerr << "Error writing mask to " << mask_path << std::endl;

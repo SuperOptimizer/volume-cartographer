@@ -1305,51 +1305,54 @@ std::string SurfaceMeta::name()
     return path.filename();
 }
 
+
 void generate_mask(QuadSurface* surf,
-                            cv::Mat_<uint8_t>& mask,
-                            cv::Mat_<uint8_t>& img,
-                            z5::Dataset* ds_high,
-                            z5::Dataset* ds_low,
-                            ChunkCache* cache) {
+                   cv::Mat_<uint8_t>& mask,
+                   cv::Mat_<uint8_t>& img,
+                   z5::Dataset* ds_mid,  // Changed from ds_high/ds_low to just ds_mid (volume 1)
+                   ChunkCache* cache) {
     cv::Mat_<cv::Vec3f> points = surf->rawPoints();
+    cv::Size native_size = points.size();
 
-    // Choose resolution based on surface size
-    if (points.cols >= 4000) {
-        // Large surface: work at 0.25x scale
-        if (ds_low && cache) {
-            readInterpolated3D(img, ds_low, points * 0.25, cache);
-        } else {
-            img.create(points.size());
-            img.setTo(0);
+    // Always work at 2x downscale
+    cv::Size downscaled_size(native_size.width / 2, native_size.height / 2);
+
+    // Generate mask at 2x downscale
+    cv::Mat_<uint8_t> mask_small(downscaled_size);
+    for(int j = 0; j < mask_small.rows; j++) {
+        for(int i = 0; i < mask_small.cols; i++) {
+            int orig_j = j * 2;
+            int orig_i = i * 2;
+            // Check if the corresponding point in the original surface is valid
+            mask_small(j,i) = (points(orig_j, orig_i)[0] == -1) ? 0 : 255;
         }
+    }
 
-        mask.create(img.size());
-        for(int j = 0; j < img.rows; j++) {
-            for(int i = 0; i < img.cols; i++) {
-                mask(j,i) = (points(j,i)[0] == -1) ? 0 : 255;
-            }
+    // Get image data at 2x downscale if volume is provided
+    if (ds_mid && cache) {
+        // Since ds_mid is already 2x downscaled, we pass points * 0.5
+        // to account for the coordinate scaling
+        readInterpolated3D(img, ds_mid, points * 0.5, cache, true);
+
+        // Ensure img is at the correct downscaled size
+        if (img.size() != downscaled_size) {
+            cv::resize(img, img, downscaled_size);
         }
     } else {
-        // Small surface: resize and downsample
-        cv::Mat_<cv::Vec3f> scaled;
-        cv::Vec2f scale = surf->scale();
-        cv::resize(points, scaled, {0,0}, 1.0/scale[0], 1.0/scale[1], cv::INTER_CUBIC);
+        // No volume data - create empty image
+        img.create(downscaled_size);
+        img.setTo(0);
+    }
 
-        if (ds_high && cache) {
-            readInterpolated3D(img, ds_high, scaled, cache);
-            cv::resize(img, img, {0,0}, 0.25, 0.25, cv::INTER_CUBIC);
-        } else {
-            img.create(cv::Size(points.cols/4.0, points.rows/4.0));
-            img.setTo(0);
-        }
+    // Resize both mask and image back to native resolution
+    cv::resize(mask_small, mask, native_size, 0, 0, cv::INTER_LINEAR);
+    cv::resize(img, img, native_size, 0, 0, cv::INTER_LINEAR);
 
-        mask.create(img.size());
-        for(int j = 0; j < img.rows; j++) {
-            for(int i = 0; i < img.cols; i++) {
-                int orig_j = j * 4 * scale[1];
-                int orig_i = i * 4 * scale[0];
-                mask(j,i) = (points(orig_j, orig_i)[0] == -1) ? 0 : 255;
-            }
+    // Apply ceiling to mask to ensure conservative masking
+    // Any interpolated value > 0 becomes 255
+    for(int j = 0; j < mask.rows; j++) {
+        for(int i = 0; i < mask.cols; i++) {
+            mask(j,i) = (mask(j,i) > 0) ? 255 : 0;
         }
     }
 }
