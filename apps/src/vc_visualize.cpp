@@ -72,7 +72,7 @@ public:
         }
 
         // Original behavior for other sources
-        std::cout << "Rendering segment: " << segment_id << " with overlaps" << std::endl;
+        std::cout << "Rendering overlaps only (no root segment)" << std::endl;
 
         // Load root segment
         auto root_meta = vpkg_->loadSurface(segment_id);
@@ -144,91 +144,131 @@ private:
     cv::Mat renderSequence(const std::string& target_segment_id, const fs::path& output_path, float opacity) {
         std::cout << "Rendering sequence with target segment: " << target_segment_id << std::endl;
 
-        // Load the target segment's metadata to get seed and sequence
+        // Load metadata
         auto target_meta = vpkg_->loadSurface(target_segment_id);
         if (!target_meta) {
             throw std::runtime_error("Failed to load target segment: " + target_segment_id);
         }
 
-        // Load meta.json to get seed and surface_sequence
         fs::path meta_path = target_meta->path / "meta.json";
-        if (!fs::exists(meta_path)) {
-            throw std::runtime_error("meta.json not found for segment: " + target_segment_id);
-        }
-
         std::ifstream meta_file(meta_path);
         json meta_json;
         meta_file >> meta_json;
 
-        if (!meta_json.contains("seed")) {
-            throw std::runtime_error("seed not found in meta.json for segment: " + target_segment_id);
-        }
-        if (!meta_json.contains("surface_sequence")) {
-            throw std::runtime_error("surface_sequence not found in meta.json for segment: " + target_segment_id);
-        }
-
         std::string seed_id = meta_json["seed"].get<std::string>();
         auto sequence = meta_json["surface_sequence"].get<std::vector<std::string>>();
 
-        std::cout << "Using seed as root: " << seed_id << std::endl;
-        std::cout << "Processing sequence of " << sequence.size() << " segments" << std::endl;
-        std::cout << "Using write-once mode to prevent overlapping pixels" << std::endl;
+        std::cout << "Using seed as reference: " << seed_id << std::endl;
+        std::cout << "Centering all segments at origin" << std::endl;
+        std::cout << "Overlays only mode: showing only colored segments" << std::endl;
 
-        // Load seed segment as the root (at origin)
+        // Load seed
         auto seed_meta = vpkg_->loadSurface(seed_id);
         if (!seed_meta) {
             throw std::runtime_error("Failed to load seed segment: " + seed_id);
         }
 
+        // Find maximum dimensions needed
         QuadSurface* seed_surf = seed_meta->surface();
-        auto [root_image, root_mask] = loadOrGenerateMaskedImage(seed_surf, seed_meta->path);
+        int max_width = seed_surf->size().width;
+        int max_height = seed_surf->size().height;
 
-        // Prepare overlaps vector
-        std::vector<SegmentData> overlaps;
-        int color_idx = 0;
-
-        // Process sequence segments until we reach the target
+        // Check all segments to find max size
         for (const std::string& seq_id : sequence) {
-            std::cout << "Processing sequence segment: " << seq_id << std::endl;
+            auto seq_meta = vpkg_->loadSurface(seq_id);
+            if (seq_meta) {
+                cv::Size s = seq_meta->surface()->size();
+                max_width = std::max(max_width, s.width);
+                max_height = std::max(max_height, s.height);
+            }
+            if (seq_id == target_segment_id) break;
+        }
+
+        // Create canvas WITHOUT padding
+        cv::Size canvas_size(max_width, max_height);
+        cv::Mat_<cv::Vec3b> output(canvas_size, cv::Vec3b(0, 0, 0));
+        cv::Mat_<uint8_t> written_mask(canvas_size, (uint8_t)0);
+
+        // Calculate center point of canvas
+        int center_x = canvas_size.width / 2;
+        int center_y = canvas_size.height / 2;
+
+        // Render seed centered at origin
+        auto [seed_image, seed_mask] = loadOrGenerateMaskedImage(seed_surf, seed_meta->path);
+
+        int seed_offset_x = center_x - seed_image.cols / 2;
+        int seed_offset_y = center_y - seed_image.rows / 2;
+
+        std::cout << "Drawing seed at center: " << seed_offset_x << ", " << seed_offset_y
+                  << " size: " << seed_image.cols << "x" << seed_image.rows << std::endl;
+
+        // Draw seed (grayscale, no tint)
+        for (int j = 0; j < seed_image.rows; j++) {
+            for (int i = 0; i < seed_image.cols; i++) {
+                if (seed_mask(j, i)) {
+                    int out_x = i + seed_offset_x;
+                    int out_y = j + seed_offset_y;
+                    if (out_x >= 0 && out_x < output.cols && out_y >= 0 && out_y < output.rows) {
+                        output(out_y, out_x) = seed_image(j, i);
+                        written_mask(out_y, out_x) = 1;
+                    }
+                }
+            }
+        }
+
+        // Process sequence segments, all centered at same point
+        int color_idx = 0;
+        for (size_t idx = 0; idx < sequence.size(); idx++) {
+            const std::string& seq_id = sequence[idx];
+            std::cout << "Processing sequence [" << idx << "]: " << seq_id << std::endl;
 
             auto seq_meta = vpkg_->loadSurface(seq_id);
             if (!seq_meta) {
-                std::cerr << "Failed to load sequence segment: " << seq_id << std::endl;
+                std::cerr << "Failed to load: " << seq_id << std::endl;
                 continue;
             }
 
             QuadSurface* seq_surf = seq_meta->surface();
-
-            // Find alignment relative to seed
-            AlignmentResult alignment = findAlignment(seed_surf, seq_surf);
-
-            if (!alignment.valid) {
-                std::cerr << "Failed to align sequence segment: " << seq_id << std::endl;
-                continue;
-            }
-
-            std::cout << "Alignment found with " << alignment.num_correspondences
-                     << " points, offset: " << alignment.pixel_offset << std::endl;
-
-            // Get or generate mask and image
             auto [seq_image, seq_mask] = loadOrGenerateMaskedImage(seq_surf, seq_meta->path);
 
-            overlaps.push_back({
-                seq_image,
-                seq_mask,
-                alignment.pixel_offset,
-                tint_colors_[color_idx % tint_colors_.size()]
-            });
-            color_idx++;
+            // Center this segment at same origin point
+            int seq_offset_x = center_x - seq_image.cols / 2;
+            int seq_offset_y = center_y - seq_image.rows / 2;
 
-            // Stop if this segment matches the target segment
+            cv::Vec3b tint = tint_colors_[color_idx++ % tint_colors_.size()];
+
+            // Draw with write-once (only new pixels)
+            int pixels_written = 0;
+            for (int j = 0; j < seq_image.rows; j++) {
+                for (int i = 0; i < seq_image.cols; i++) {
+                    if (seq_mask(j, i)) {
+                        int out_x = i + seq_offset_x;
+                        int out_y = j + seq_offset_y;
+                        if (out_x >= 0 && out_x < output.cols && out_y >= 0 && out_y < output.rows) {
+                            if (!written_mask(out_y, out_x)) {
+                                cv::Vec3b src = seq_image(j, i);
+                                // Apply tint
+                                for (int c = 0; c < 3; c++) {
+                                    src[c] = std::min(255, src[c] + tint[c]);
+                                }
+                                output(out_y, out_x) = src;
+                                written_mask(out_y, out_x) = 1;
+                                pixels_written++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            std::cout << "Added " << pixels_written << " unique pixels" << std::endl;
+
             if (seq_id == target_segment_id) {
-                std::cout << "Reached target segment, stopping sequence" << std::endl;
+                std::cout << "Reached target segment" << std::endl;
                 break;
             }
         }
 
-        // If target segment wasn't in the sequence, add it as the final overlay
+        // Add target if not in sequence
         bool found_target = false;
         for (const auto& seq_id : sequence) {
             if (seq_id == target_segment_id) {
@@ -238,32 +278,46 @@ private:
         }
 
         if (!found_target) {
-            std::cout << "Target segment not in sequence, adding as final overlay" << std::endl;
+            std::cout << "Adding target segment (not in sequence)" << std::endl;
 
             QuadSurface* target_surf = target_meta->surface();
-            AlignmentResult alignment = findAlignment(seed_surf, target_surf);
+            auto [target_image, target_mask] = loadOrGenerateMaskedImage(target_surf, target_meta->path);
 
-            if (alignment.valid) {
-                auto [target_image, target_mask] = loadOrGenerateMaskedImage(target_surf, target_meta->path);
-                overlaps.push_back({
-                    target_image,
-                    target_mask,
-                    alignment.pixel_offset,
-                    tint_colors_[color_idx % tint_colors_.size()]
-                });
-            } else {
-                std::cerr << "Failed to align target segment: " << target_segment_id << std::endl;
+            int target_offset_x = center_x - target_image.cols / 2;
+            int target_offset_y = center_y - target_image.rows / 2;
+
+            cv::Vec3b tint = tint_colors_[color_idx % tint_colors_.size()];
+
+            int pixels_written = 0;
+            for (int j = 0; j < target_image.rows; j++) {
+                for (int i = 0; i < target_image.cols; i++) {
+                    if (target_mask(j, i)) {
+                        int out_x = i + target_offset_x;
+                        int out_y = j + target_offset_y;
+                        if (out_x >= 0 && out_x < output.cols && out_y >= 0 && out_y < output.rows) {
+                            if (!written_mask(out_y, out_x)) {
+                                cv::Vec3b src = target_image(j, i);
+                                for (int c = 0; c < 3; c++) {
+                                    src[c] = std::min(255, src[c] + tint[c]);
+                                }
+                                output(out_y, out_x) = src;
+                                written_mask(out_y, out_x) = 1;
+                                pixels_written++;
+                            }
+                        }
+                    }
+                }
             }
+            std::cout << "Target added " << pixels_written << " unique pixels" << std::endl;
         }
 
-        // Composite all segments with seed as base
-        cv::Mat final_image = compositeSegments(root_image, root_mask, overlaps, opacity);
+        // Auto-crop to remove black borders
+        cv::Mat cropped = autoCrop(output, written_mask);
 
-        // Save output
-        cv::imwrite(output_path.string(), final_image);
+        cv::imwrite(output_path.string(), cropped);
         std::cout << "Saved to: " << output_path << std::endl;
 
-        return final_image;
+        return cropped;
     }
 
     std::vector<std::string> getOverlapIds(const std::string& root_id,
@@ -309,22 +363,6 @@ private:
         cv::Mat_<uint8_t> mask;
         cv::Mat_<uint8_t> img;
         fs::path mask_path = segment_path / "mask.tif";
-
-        // Check if mask.tif exists
-        //TODO: fixme
-        /*
-        if (fs::exists(mask_path)) {
-            std::cout << "Loading existing mask from: " << mask_path << std::endl;
-            std::vector<cv::Mat> layers;
-            cv::imreadmulti(mask_path.string(), layers, cv::IMREAD_GRAYSCALE);
-            if (layers.size() == 2) {
-                mask = layers[1];
-                cv::Size surf_size = surf->size();
-                if (mask.size() != surf_size) {
-                    cv::resize(mask, mask, surf_size, 0, 0, cv::INTER_NEAREST);
-                }
-            }
-        }*/
 
         // If no mask loaded, generate it along with the image
         if (mask.empty()) {
@@ -401,8 +439,8 @@ private:
         std::vector<cv::Vec2f> ref_coords;
         std::vector<cv::Vec2f> target_coords;
 
-        // Sample points from intersection
-        int step = std::max(10, std::min(intersect_points.rows, intersect_points.cols) / 20);
+        // Sample more points for better alignment
+        int step = std::max(5, std::min(intersect_points.rows, intersect_points.cols) / 30);
 
         for (int j = step; j < intersect_points.rows - step; j += step) {
             for (int i = step; i < intersect_points.cols - step; i += step) {
@@ -423,18 +461,18 @@ private:
                     target_coords.push_back(cv::Vec2f(target_loc[0], target_loc[1]));
                 }
 
-                if (ref_coords.size() >= 50) break;
+                if (ref_coords.size() >= 100) break;  // Increased from 50
             }
-            if (ref_coords.size() >= 50) break;
+            if (ref_coords.size() >= 100) break;
         }
 
         delete intersection;
 
-        if (ref_coords.size() < 3) {
+        if (ref_coords.size() < 10) {  // Increased minimum from 3
             return result;
         }
 
-        // Calculate robust offset
+        // Calculate robust offset using trimmed mean (remove outliers)
         std::vector<float> x_offsets, y_offsets;
         for (size_t k = 0; k < ref_coords.size(); k++) {
             x_offsets.push_back(ref_coords[k][0] - target_coords[k][0]);
@@ -444,8 +482,17 @@ private:
         std::sort(x_offsets.begin(), x_offsets.end());
         std::sort(y_offsets.begin(), y_offsets.end());
 
-        result.pixel_offset = cv::Vec2f(x_offsets[x_offsets.size()/2],
-                                       y_offsets[y_offsets.size()/2]);
+        // Use trimmed mean: ignore top and bottom 20% of values
+        int trim_count = x_offsets.size() / 5;
+        float x_sum = 0, y_sum = 0;
+        int count = 0;
+        for (size_t i = trim_count; i < x_offsets.size() - trim_count; i++) {
+            x_sum += x_offsets[i];
+            y_sum += y_offsets[i];
+            count++;
+        }
+
+        result.pixel_offset = cv::Vec2f(x_sum / count, y_sum / count);
         result.num_correspondences = ref_coords.size();
         result.valid = true;
 
@@ -468,23 +515,22 @@ private:
             max_y = std::max(max_y, (int)(overlap.offset[1] + overlap.image.rows));
         }
 
-        // Add padding
-        int padding = 50;
-        cv::Size output_size(max_x - min_x + 2*padding, max_y - min_y + 2*padding);
+        // Create output WITHOUT padding
+        cv::Size output_size(max_x - min_x, max_y - min_y);
         cv::Mat_<cv::Vec3b> output(output_size, cv::Vec3b(0, 0, 0));
 
-        cv::Vec2f global_offset(-min_x + padding, -min_y + padding);
+        cv::Vec2f global_offset(-min_x, -min_y);
 
         // Draw root
-        for (int y = 0; y < root_image.rows; y++) {
-            for (int x = 0; x < root_image.cols; x++) {
-                if (root_mask(y, x)) {
-                    int out_x = x + global_offset[0];
-                    int out_y = y + global_offset[1];
-                    output(out_y, out_x) = root_image(y, x);
-                }
-            }
-        }
+        //for (int y = 0; y < root_image.rows; y++) {
+        //    for (int x = 0; x < root_image.cols; x++) {
+        //        if (root_mask(y, x)) {
+        //            int out_x = x + global_offset[0];
+        //            int out_y = y + global_offset[1];
+        //            output(out_y, out_x) = root_image(y, x);
+        //        }
+        //    }
+        //}
 
         // Overlay the overlaps with tinting and transparency
         for (const auto& overlap : overlaps) {
@@ -516,6 +562,32 @@ private:
 
         return output;
     }
+
+    cv::Mat autoCrop(const cv::Mat_<cv::Vec3b>& image, const cv::Mat_<uint8_t>& mask) {
+        // Find bounding rectangle of non-zero pixels in mask
+        int min_x = image.cols, max_x = 0;
+        int min_y = image.rows, max_y = 0;
+
+        for (int y = 0; y < mask.rows; y++) {
+            for (int x = 0; x < mask.cols; x++) {
+                if (mask(y, x)) {
+                    min_x = std::min(min_x, x);
+                    max_x = std::max(max_x, x);
+                    min_y = std::min(min_y, y);
+                    max_y = std::max(max_y, y);
+                }
+            }
+        }
+
+        // If no valid pixels found, return original
+        if (min_x > max_x || min_y > max_y) {
+            return image;
+        }
+
+        // Create cropped image
+        cv::Rect crop_rect(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
+        return image(crop_rect).clone();
+    }
 };
 
 
@@ -535,7 +607,7 @@ int main(int argc, char* argv[]) {
     std::string segment_id = argv[3];
     std::string overlap_source = argv[4];
     fs::path output_path = argv[5];
-    float opacity = 0.8f;
+    float opacity = 0.5f;
 
     // Parse overlap source
     if (overlap_source != "overlapping" && overlap_source != "sequence" && overlap_source != "contributing") {
