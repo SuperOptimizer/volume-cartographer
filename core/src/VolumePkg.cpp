@@ -256,12 +256,12 @@ void VolumePkg::loadSegmentationsFromDirectory(const std::string& dirName)
             toRemove.push_back(pair.first);
         }
     }
-    
+
     // Remove old segmentations from this directory
     for (const auto& id : toRemove) {
         segmentations_.erase(id);
         segmentationDirectories_.erase(id);
-        
+
         // Remove from files vector
         auto it = std::remove_if(segmentation_files_.begin(), segmentation_files_.end(),
             [&id, this](const std::filesystem::path& path) {
@@ -270,14 +270,14 @@ void VolumePkg::loadSegmentationsFromDirectory(const std::string& dirName)
             });
         segmentation_files_.erase(it, segmentation_files_.end());
     }
-    
+
     // Check if directory exists
     const auto segDir = ::SegsDir(rootDir_, dirName);
     if (!std::filesystem::exists(segDir)) {
         Logger()->warn("Segmentation directory '{}' does not exist", dirName);
         return;
     }
-    
+
     // Load segmentations from the specified directory
     for (const auto& entry : std::filesystem::directory_iterator(segDir)) {
         std::filesystem::path dirpath = std::filesystem::canonical(entry);
@@ -311,7 +311,7 @@ auto VolumePkg::getSegmentationDirectory() const -> std::string
 auto VolumePkg::getAvailableSegmentationDirectories() const -> std::vector<std::string>
 {
     std::vector<std::string> dirs;
-    
+
     // Check for common segmentation directories
     const std::vector<std::string> commonDirs = {"paths", "traces"};
     for (const auto& dir : commonDirs) {
@@ -319,7 +319,7 @@ auto VolumePkg::getAvailableSegmentationDirectories() const -> std::vector<std::
             dirs.push_back(dir);
         }
     }
-    
+
     return dirs;
 }
 
@@ -330,20 +330,20 @@ void VolumePkg::removeSegmentation(const std::string& id)
     if (it == segmentations_.end()) {
         throw std::runtime_error("Segmentation not found: " + id);
     }
-    
+
     // Get the path before removing
     std::filesystem::path segPath = it->second->path();
-    
+
     // Remove from internal map
     segmentations_.erase(it);
-    
+
     // Remove from files vector
-    auto fileIt = std::find(segmentation_files_.begin(), 
+    auto fileIt = std::find(segmentation_files_.begin(),
                            segmentation_files_.end(), segPath);
     if (fileIt != segmentation_files_.end()) {
         segmentation_files_.erase(fileIt);
     }
-    
+
     // Delete the physical folder
     if (std::filesystem::exists(segPath)) {
         std::filesystem::remove_all(segPath);
@@ -357,7 +357,7 @@ void VolumePkg::refreshSegmentations()
         Logger()->warn("Segmentation directory '{}' does not exist", currentSegmentationDir_);
         return;
     }
-    
+
     // Build a set of current segmentation paths on disk for the current directory
     std::set<std::filesystem::path> diskPaths;
     for (const auto& entry : std::filesystem::directory_iterator(segDir)) {
@@ -366,7 +366,7 @@ void VolumePkg::refreshSegmentations()
             diskPaths.insert(dirpath);
         }
     }
-    
+
     // Find segmentations to remove (loaded from current directory but not on disk anymore)
     std::vector<std::string> toRemove;
     for (const auto& seg : segmentations_) {
@@ -380,35 +380,35 @@ void VolumePkg::refreshSegmentations()
             }
         }
     }
-    
+
     // Remove segmentations that no longer exist
     for (const auto& id : toRemove) {
         Logger()->info("Removing segmentation '{}' - no longer exists on disk", id);
-        
+
         // Get the path before removing the segmentation
         std::filesystem::path segPath;
         auto segIt = segmentations_.find(id);
         if (segIt != segmentations_.end()) {
             segPath = segIt->second->path();
         }
-        
+
         // Remove from segmentations map
         segmentations_.erase(id);
-        
+
         // Remove from directories map
         segmentationDirectories_.erase(id);
-        
+
         // Remove from files vector if we have a path
         if (!segPath.empty()) {
-            auto fileIt = std::find(segmentation_files_.begin(), 
-                                  segmentation_files_.end(), 
+            auto fileIt = std::find(segmentation_files_.begin(),
+                                  segmentation_files_.end(),
                                   segPath);
             if (fileIt != segmentation_files_.end()) {
                 segmentation_files_.erase(fileIt);
             }
         }
     }
-    
+
     // Find and add new segmentations (on disk but not in memory)
     for (const auto& diskPath : diskPaths) {
         bool found = false;
@@ -418,7 +418,7 @@ void VolumePkg::refreshSegmentations()
                 break;
             }
         }
-        
+
         if (!found) {
             try {
                 auto s = Segmentation::New(diskPath);

@@ -57,7 +57,7 @@ public:
     void loadSurfacesBatch(const std::vector<std::string>& ids);
 
 
-private:
+public:
     Metadata config_;
     std::filesystem::path rootDir_;
     std::map<std::string, std::shared_ptr<Volume>> volumes_;
