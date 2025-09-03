@@ -32,14 +32,20 @@ private:
     std::shared_ptr<Volume> volume_;
     ChunkCache* cache_;
 
-    std::vector<cv::Vec3b> tint_colors_ = {
-        cv::Vec3b(0, 100, 0),    // Green tint
-        cv::Vec3b(100, 0, 0),    // Red tint
-        cv::Vec3b(0, 0, 100),    // Blue tint
-        cv::Vec3b(100, 100, 0),  // Yellow tint
-        cv::Vec3b(100, 0, 100),  // Magenta tint
-        cv::Vec3b(0, 100, 100),  // Cyan tint
-    };
+    cv::Vec3b getColormapColor(int index, int total_count) {
+        // Map index to 0-255 range
+        int gray_value = (index * 255) / std::max(1, total_count - 1);
+
+        // Create single pixel grayscale image
+        cv::Mat gray(1, 1, CV_8UC1, cv::Scalar(gray_value));
+        cv::Mat colored;
+
+        // Apply viridis colormap
+        cv::applyColorMap(gray, colored, cv::COLORMAP_VIRIDIS);
+
+        // Extract and return the color
+        return colored.at<cv::Vec3b>(0, 0);
+    }
 
 public:
     SegmentRenderer(const fs::path& volpkg_path, const std::string& volume_id) {
@@ -92,7 +98,6 @@ public:
         std::vector<SegmentData> overlaps;
 
         // Process each overlap
-        int color_idx = 0;
         int num_processed = 0;
         for (const std::string& overlap_id : overlap_ids) {
             num_processed++;
@@ -121,13 +126,15 @@ public:
             // Get or generate mask and image for overlap
             auto [overlap_image, overlap_mask] = loadOrGenerateMaskedImage(overlap_surf, overlap_meta->path);
 
+            // Use colormap based on position
+            cv::Vec3b color = getColormapColor(overlaps.size(), std::min(6, (int)overlap_ids.size()));
+
             overlaps.push_back({
                 overlap_image,
                 overlap_mask,
                 alignment.pixel_offset,
-                tint_colors_[color_idx % tint_colors_.size()]
+                color
             });
-            color_idx++;
         }
 
         // Composite all segments
@@ -197,8 +204,20 @@ private:
         // Just load seed for reference but don't draw it
         auto [seed_image, seed_mask] = loadOrGenerateMaskedImage(seed_surf, seed_meta->path);
 
+        // Calculate total segments to process for colormap scaling
+        int total_segments = sequence.size();
+        bool target_in_sequence = false;
+        for (const auto& seq_id : sequence) {
+            if (seq_id == target_segment_id) {
+                target_in_sequence = true;
+                break;
+            }
+        }
+        if (!target_in_sequence) {
+            total_segments++; // Account for target segment if not in sequence
+        }
+
         // Process sequence segments, all centered at same point
-        int color_idx = 0;
         for (size_t idx = 0; idx < sequence.size(); idx++) {
             const std::string& seq_id = sequence[idx];
             std::cout << "Processing sequence [" << idx << "]: " << seq_id << std::endl;
@@ -216,7 +235,8 @@ private:
             int seq_offset_x = center_x - seq_image.cols / 2;
             int seq_offset_y = center_y - seq_image.rows / 2;
 
-            cv::Vec3b tint = tint_colors_[color_idx++ % tint_colors_.size()];
+            // Get colormap color based on position
+            cv::Vec3b color = getColormapColor(idx, total_segments);
 
             // Draw with write-once (only new pixels)
             int pixels_written = 0;
@@ -227,12 +247,8 @@ private:
                         int out_y = j + seq_offset_y;
                         if (out_x >= 0 && out_x < output.cols && out_y >= 0 && out_y < output.rows) {
                             if (!written_mask(out_y, out_x)) {
-                                cv::Vec3b src = seq_image(j, i);
-                                // Apply tint
-                                for (int c = 0; c < 3; c++) {
-                                    src[c] = std::min(255, src[c] + tint[c]);
-                                }
-                                output(out_y, out_x) = src;
+                                // Apply colormap color directly (not as tint)
+                                output(out_y, out_x) = color;
                                 written_mask(out_y, out_x) = 1;
                                 pixels_written++;
                             }
@@ -267,7 +283,8 @@ private:
             int target_offset_x = center_x - target_image.cols / 2;
             int target_offset_y = center_y - target_image.rows / 2;
 
-            cv::Vec3b tint = tint_colors_[color_idx % tint_colors_.size()];
+            // Use last position in colormap for target
+            cv::Vec3b color = getColormapColor(sequence.size(), total_segments);
 
             int pixels_written = 0;
             for (int j = 0; j < target_image.rows; j++) {
@@ -277,11 +294,7 @@ private:
                         int out_y = j + target_offset_y;
                         if (out_x >= 0 && out_x < output.cols && out_y >= 0 && out_y < output.rows) {
                             if (!written_mask(out_y, out_x)) {
-                                cv::Vec3b src = target_image(j, i);
-                                for (int c = 0; c < 3; c++) {
-                                    src[c] = std::min(255, src[c] + tint[c]);
-                                }
-                                output(out_y, out_x) = src;
+                                output(out_y, out_x) = color;
                                 written_mask(out_y, out_x) = 1;
                                 pixels_written++;
                             }
@@ -504,7 +517,7 @@ private:
 
         // Skip drawing root - only render colored overlays
 
-        // Overlay the overlaps with tinting and transparency
+        // Overlay the overlaps with colormap colors
         for (const auto& overlap : overlaps) {
             for (int y = 0; y < overlap.image.rows; y++) {
                 for (int x = 0; x < overlap.image.cols; x++) {
@@ -515,12 +528,9 @@ private:
                         if (out_x >= 0 && out_x < output.cols &&
                             out_y >= 0 && out_y < output.rows) {
                             cv::Vec3b& dst = output(out_y, out_x);
-                            cv::Vec3b src = overlap.image(y, x);
 
-                            // Apply tint to the overlap
-                            for (int c = 0; c < 3; c++) {
-                                src[c] = std::min(255, src[c] + overlap.tint[c]);
-                            }
+                            // Use colormap color directly
+                            cv::Vec3b src = overlap.tint;  // 'tint' now holds the actual colormap color
 
                             // Blend with transparency
                             for (int c = 0; c < 3; c++) {
