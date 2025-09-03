@@ -72,12 +72,16 @@ public:
     cv::Mat render(const std::string& segment_id, const fs::path& output_path,
                    std::string source, float opacity = 0.4) {
 
-        // Special handling for sequence source
+        // Special handling for sequence and approved_patches sources
         if (source == "sequence") {
             return renderSequence(segment_id, output_path, opacity);
         }
 
-        // Handle contributing, overlapping, and approved_patches sources
+        if (source == "approved_patches") {
+            return renderApprovedPatches(segment_id, output_path, opacity);
+        }
+
+        // Handle contributing and overlapping sources with alignment
         std::cout << "Rendering " << source << " surfaces for segment: " << segment_id << std::endl;
 
         // Load target segment
@@ -91,7 +95,7 @@ public:
         // Get or generate mask and image for target
         auto [target_image, target_mask] = loadOrGenerateMaskedImage(target_surf, target_meta->path);
 
-        // Get overlapping/contributing/approved segments based on source
+        // Get overlapping/contributing segments based on source
         std::vector<std::string> surface_ids = getOverlapIds(segment_id, target_meta, source);
 
         std::cout << "Found " << surface_ids.size() << " " << source << " surfaces" << std::endl;
@@ -161,7 +165,7 @@ public:
             }
         }
 
-        // Draw contributing/overlapping/approved surfaces with alignment offsets
+        // Draw contributing/overlapping surfaces with alignment offsets
         for (const auto& surface : surfaces) {
             for (int j = 0; j < surface.image.rows; j++) {
                 for (int i = 0; i < surface.image.cols; i++) {
@@ -192,6 +196,116 @@ public:
     }
 
 private:
+    cv::Mat renderApprovedPatches(const std::string& target_segment_id, const fs::path& output_path, float opacity) {
+        std::cout << "Rendering approved patches for segment: " << target_segment_id << std::endl;
+
+        // Load target metadata
+        auto target_meta = vpkg_->loadSurface(target_segment_id);
+        if (!target_meta) {
+            throw std::runtime_error("Failed to load target segment: " + target_segment_id);
+        }
+
+        // Get approved patches
+        std::vector<std::string> patch_ids = getOverlapIds(target_segment_id, target_meta, "approved_patches");
+        std::cout << "Found " << patch_ids.size() << " approved patches" << std::endl;
+
+        // Load target surface
+        QuadSurface* target_surf = target_meta->surface();
+        auto [target_image, target_mask] = loadOrGenerateMaskedImage(target_surf, target_meta->path);
+
+        // Find maximum dimensions
+        int max_width = target_image.cols;
+        int max_height = target_image.rows;
+
+        // Check all patches to find max size
+        for (const std::string& patch_id : patch_ids) {
+            auto patch_meta = vpkg_->loadSurface(patch_id);
+            if (patch_meta) {
+                cv::Size s = patch_meta->surface()->size();
+                max_width = std::max(max_width, s.width);
+                max_height = std::max(max_height, s.height);
+            }
+        }
+
+        // Create canvas
+        cv::Size canvas_size(max_width, max_height);
+        cv::Mat_<cv::Vec3b> output(canvas_size, cv::Vec3b(0, 0, 0));
+        cv::Mat_<uint8_t> written_mask(canvas_size, (uint8_t)0);
+
+        // Calculate center point
+        int center_x = canvas_size.width / 2;
+        int center_y = canvas_size.height / 2;
+
+        int total_surfaces = patch_ids.size() + 1; // +1 for target
+
+        // Draw target segment first
+        int target_offset_x = center_x - target_image.cols / 2;
+        int target_offset_y = center_y - target_image.rows / 2;
+        cv::Vec3b target_color = getColormapColor(0, total_surfaces);
+
+        for (int j = 0; j < target_image.rows; j++) {
+            for (int i = 0; i < target_image.cols; i++) {
+                if (target_mask(j, i)) {
+                    int out_x = i + target_offset_x;
+                    int out_y = j + target_offset_y;
+                    if (out_x >= 0 && out_x < output.cols && out_y >= 0 && out_y < output.rows) {
+                        output(out_y, out_x) = target_color;
+                        written_mask(out_y, out_x) = 1;
+                    }
+                }
+            }
+        }
+
+        // Process each approved patch
+        for (size_t idx = 0; idx < patch_ids.size(); idx++) {
+            const std::string& patch_id = patch_ids[idx];
+            std::cout << "Processing patch [" << idx << "]: " << patch_id << std::endl;
+
+            auto patch_meta = vpkg_->loadSurface(patch_id);
+            if (!patch_meta) {
+                std::cerr << "Failed to load: " << patch_id << std::endl;
+                continue;
+            }
+
+            QuadSurface* patch_surf = patch_meta->surface();
+            auto [patch_image, patch_mask] = loadOrGenerateMaskedImage(patch_surf, patch_meta->path);
+
+            // Center this patch
+            int patch_offset_x = center_x - patch_image.cols / 2;
+            int patch_offset_y = center_y - patch_image.rows / 2;
+
+            // Get colormap color
+            cv::Vec3b color = getColormapColor(idx + 1, total_surfaces);
+
+            // Draw with write-once
+            int pixels_written = 0;
+            for (int j = 0; j < patch_image.rows; j++) {
+                for (int i = 0; i < patch_image.cols; i++) {
+                    if (patch_mask(j, i)) {
+                        int out_x = i + patch_offset_x;
+                        int out_y = j + patch_offset_y;
+                        if (out_x >= 0 && out_x < output.cols && out_y >= 0 && out_y < output.rows) {
+                            if (!written_mask(out_y, out_x)) {
+                                output(out_y, out_x) = color;
+                                written_mask(out_y, out_x) = 1;
+                                pixels_written++;
+                            }
+                        }
+                    }
+                }
+            }
+            std::cout << "Added " << pixels_written << " unique pixels from " << patch_id << std::endl;
+        }
+
+        // Auto-crop
+        cv::Mat cropped = autoCrop(output, written_mask);
+
+        cv::imwrite(output_path.string(), cropped);
+        std::cout << "Saved to: " << output_path << std::endl;
+
+        return cropped;
+    }
+
     cv::Mat renderSequence(const std::string& target_segment_id, const fs::path& output_path, float opacity) {
         std::cout << "Rendering sequence with target segment: " << target_segment_id << std::endl;
 
@@ -356,7 +470,7 @@ private:
             if (root_meta->overlapping_str.empty()) {
                 throw std::runtime_error("No overlapping segments found in overlapping.json for segment: " + root_id);
             }
-            //overlap_ids = root_meta->overlapping_str;
+            overlap_ids.assign(root_meta->overlapping_str.begin(), root_meta->overlapping_str.end());
         } else if (source == "contributing")  {
             fs::path meta_path = root_meta->path / "meta.json";
             if (!fs::exists(meta_path)) {
