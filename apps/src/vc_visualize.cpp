@@ -193,28 +193,9 @@ private:
         int center_x = canvas_size.width / 2;
         int center_y = canvas_size.height / 2;
 
-        // Render seed centered at origin
+        // Skip drawing the seed - only process colored overlays
+        // Just load seed for reference but don't draw it
         auto [seed_image, seed_mask] = loadOrGenerateMaskedImage(seed_surf, seed_meta->path);
-
-        int seed_offset_x = center_x - seed_image.cols / 2;
-        int seed_offset_y = center_y - seed_image.rows / 2;
-
-        std::cout << "Drawing seed at center: " << seed_offset_x << ", " << seed_offset_y
-                  << " size: " << seed_image.cols << "x" << seed_image.rows << std::endl;
-
-        // Draw seed (grayscale, no tint)
-        for (int j = 0; j < seed_image.rows; j++) {
-            for (int i = 0; i < seed_image.cols; i++) {
-                if (seed_mask(j, i)) {
-                    int out_x = i + seed_offset_x;
-                    int out_y = j + seed_offset_y;
-                    if (out_x >= 0 && out_x < output.cols && out_y >= 0 && out_y < output.rows) {
-                        output(out_y, out_x) = seed_image(j, i);
-                        written_mask(out_y, out_x) = 1;
-                    }
-                }
-            }
-        }
 
         // Process sequence segments, all centered at same point
         int color_idx = 0;
@@ -521,16 +502,7 @@ private:
 
         cv::Vec2f global_offset(-min_x, -min_y);
 
-        // Draw root
-        //for (int y = 0; y < root_image.rows; y++) {
-        //    for (int x = 0; x < root_image.cols; x++) {
-        //        if (root_mask(y, x)) {
-        //            int out_x = x + global_offset[0];
-        //            int out_y = y + global_offset[1];
-        //            output(out_y, out_x) = root_image(y, x);
-        //        }
-        //    }
-        //}
+        // Skip drawing root - only render colored overlays
 
         // Overlay the overlaps with tinting and transparency
         for (const auto& overlap : overlaps) {
