@@ -62,11 +62,15 @@ endif()
 
 if(VC_USE_OPENMP)
     message(STATUS "OpenMP support enabled")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp ")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fopenmp ")
 
     find_package(OpenMP REQUIRED)
     set(XTENSOR_USE_OPENMP 1)
 else()
     message(STATUS "OpenMP support disabled")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-openmp ")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-openmp ")
 
     set(XTENSOR_USE_OPENMP 0)
     include_directories(${CMAKE_SOURCE_DIR}/core/openmp_stub)

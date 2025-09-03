@@ -7,14 +7,19 @@
 #include <opencv2/imgproc.hpp>
 #include <iostream>
 #include <random>
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
+
 struct SegmentData {
     cv::Mat_<cv::Vec3b> image;
     cv::Mat_<uint8_t> mask;
     cv::Vec2f offset;
     cv::Vec3b tint;
 };
+
 struct AlignmentResult {
     cv::Vec2f pixel_offset;
     int num_correspondences;
@@ -37,31 +42,20 @@ private:
     };
 
 public:
-    SegmentRenderer(const fs::path& volpkg_path, const std::string& volume_id = "") {
+    SegmentRenderer(const fs::path& volpkg_path, const std::string& volume_id) {
         vpkg_ = VolumePkg::New(volpkg_path.string());
 
-        // Select the volume
-        if (!volume_id.empty()) {
-            // Use specified volume
-            if (!vpkg_->hasVolume(volume_id)) {
-                throw std::runtime_error("Volume not found: " + volume_id);
-            }
-            volume_ = vpkg_->volume(volume_id);
-            std::cout << "Using volume: " << volume_id << " (" << volume_->name() << ")" << std::endl;
-        } else {
-            // Use default (first) volume
-            if (!vpkg_->hasVolumes()) {
-                throw std::runtime_error("No volumes found in package");
-            }
-            volume_ = vpkg_->volume();
-            std::cout << "Using default volume: " << volume_->id() << " (" << volume_->name() << ")" << std::endl;
+        if (volume_id.empty()) {
+            throw std::runtime_error("You must provide a volume id");
         }
 
-        // Print volume info
-        std::cout << "Volume dimensions: " << volume_->sliceWidth() << "x"
-                  << volume_->sliceHeight() << "x" << volume_->numSlices() << std::endl;
+        if (!vpkg_->hasVolume(volume_id)) {
+            throw std::runtime_error("Volume not found: " + volume_id);
+        }
+        volume_ = vpkg_->volume(volume_id);
+        std::cout << "Using volume: " << volume_id << " (" << volume_->name() << ")" << std::endl;
+        std::cout << "Volume dimensions: " << volume_->sliceWidth() << "x" << volume_->sliceHeight() << "x" << volume_->numSlices() << std::endl;
         std::cout << "Available scales: " << volume_->numScales() << std::endl;
-
         cache_ = new ChunkCache(2ULL * 1024ULL * 1024ULL * 1024ULL);
     }
 
@@ -69,29 +63,21 @@ public:
         delete cache_;
     }
 
-    // List available volumes
-    static void listVolumes(const fs::path& volpkg_path) {
-        auto vpkg = VolumePkg::New(volpkg_path.string());
-        if (!vpkg->hasVolumes()) {
-            std::cout << "No volumes found in package" << std::endl;
-            return;
+    cv::Mat render(const std::string& segment_id, const fs::path& output_path,
+                   std::string source, float opacity = 0.4) {
+
+        // Special handling for sequence source
+        if (source == "sequence") {
+            return renderSequence(segment_id, output_path, opacity);
         }
 
-        std::cout << "Available volumes:" << std::endl;
-        auto ids = vpkg->volumeIDs();
-        auto names = vpkg->volumeNames();
-        for (size_t i = 0; i < ids.size(); i++) {
-            std::cout << "  " << ids[i] << " - " << names[i] << std::endl;
-        }
-    }
-
-    cv::Mat render(const std::string& root_id, const fs::path& output_path, float opacity = 0.4) {
-        std::cout << "Rendering segment: " << root_id << " with overlaps" << std::endl;
+        // Original behavior for other sources
+        std::cout << "Rendering segment: " << segment_id << " with overlaps" << std::endl;
 
         // Load root segment
-        auto root_meta = vpkg_->loadSurface(root_id);
+        auto root_meta = vpkg_->loadSurface(segment_id);
         if (!root_meta) {
-            throw std::runtime_error("Failed to load root segment: " + root_id);
+            throw std::runtime_error("Failed to load root segment: " + segment_id);
         }
 
         QuadSurface* root_surf = root_meta->surface();
@@ -99,18 +85,16 @@ public:
         // Get or generate mask and image for root
         auto [root_image, root_mask] = loadOrGenerateMaskedImage(root_surf, root_meta->path);
 
-        // Get overlapping segments
-        root_meta->readOverlapping();
-        std::cout << "Found " << root_meta->overlapping_str.size() << " overlapping segments" << std::endl;
+        // Get overlapping segments based on source
+        std::vector<std::string> overlap_ids = getOverlapIds(segment_id, root_meta, source);
 
-
-
+        std::cout << "Found " << overlap_ids.size() << " overlapping segments from source: " << source << std::endl;
         std::vector<SegmentData> overlaps;
 
         // Process each overlap
         int color_idx = 0;
         int num_processed = 0;
-        for (const std::string& overlap_id : root_meta->overlapping_str) {
+        for (const std::string& overlap_id : overlap_ids) {
             num_processed++;
             if (num_processed > 5) break;
             std::cout << "Processing overlap: " << overlap_id << std::endl;
@@ -157,26 +141,190 @@ public:
     }
 
 private:
+    cv::Mat renderSequence(const std::string& target_segment_id, const fs::path& output_path, float opacity) {
+        std::cout << "Rendering sequence with target segment: " << target_segment_id << std::endl;
+
+        // Load the target segment's metadata to get seed and sequence
+        auto target_meta = vpkg_->loadSurface(target_segment_id);
+        if (!target_meta) {
+            throw std::runtime_error("Failed to load target segment: " + target_segment_id);
+        }
+
+        // Load meta.json to get seed and surface_sequence
+        fs::path meta_path = target_meta->path / "meta.json";
+        if (!fs::exists(meta_path)) {
+            throw std::runtime_error("meta.json not found for segment: " + target_segment_id);
+        }
+
+        std::ifstream meta_file(meta_path);
+        json meta_json;
+        meta_file >> meta_json;
+
+        if (!meta_json.contains("seed")) {
+            throw std::runtime_error("seed not found in meta.json for segment: " + target_segment_id);
+        }
+        if (!meta_json.contains("surface_sequence")) {
+            throw std::runtime_error("surface_sequence not found in meta.json for segment: " + target_segment_id);
+        }
+
+        std::string seed_id = meta_json["seed"].get<std::string>();
+        auto sequence = meta_json["surface_sequence"].get<std::vector<std::string>>();
+
+        std::cout << "Using seed as root: " << seed_id << std::endl;
+        std::cout << "Processing sequence of " << sequence.size() << " segments" << std::endl;
+        std::cout << "Using write-once mode to prevent overlapping pixels" << std::endl;
+
+        // Load seed segment as the root (at origin)
+        auto seed_meta = vpkg_->loadSurface(seed_id);
+        if (!seed_meta) {
+            throw std::runtime_error("Failed to load seed segment: " + seed_id);
+        }
+
+        QuadSurface* seed_surf = seed_meta->surface();
+        auto [root_image, root_mask] = loadOrGenerateMaskedImage(seed_surf, seed_meta->path);
+
+        // Prepare overlaps vector
+        std::vector<SegmentData> overlaps;
+        int color_idx = 0;
+
+        // Process sequence segments until we reach the target
+        for (const std::string& seq_id : sequence) {
+            std::cout << "Processing sequence segment: " << seq_id << std::endl;
+
+            auto seq_meta = vpkg_->loadSurface(seq_id);
+            if (!seq_meta) {
+                std::cerr << "Failed to load sequence segment: " << seq_id << std::endl;
+                continue;
+            }
+
+            QuadSurface* seq_surf = seq_meta->surface();
+
+            // Find alignment relative to seed
+            AlignmentResult alignment = findAlignment(seed_surf, seq_surf);
+
+            if (!alignment.valid) {
+                std::cerr << "Failed to align sequence segment: " << seq_id << std::endl;
+                continue;
+            }
+
+            std::cout << "Alignment found with " << alignment.num_correspondences
+                     << " points, offset: " << alignment.pixel_offset << std::endl;
+
+            // Get or generate mask and image
+            auto [seq_image, seq_mask] = loadOrGenerateMaskedImage(seq_surf, seq_meta->path);
+
+            overlaps.push_back({
+                seq_image,
+                seq_mask,
+                alignment.pixel_offset,
+                tint_colors_[color_idx % tint_colors_.size()]
+            });
+            color_idx++;
+
+            // Stop if this segment matches the target segment
+            if (seq_id == target_segment_id) {
+                std::cout << "Reached target segment, stopping sequence" << std::endl;
+                break;
+            }
+        }
+
+        // If target segment wasn't in the sequence, add it as the final overlay
+        bool found_target = false;
+        for (const auto& seq_id : sequence) {
+            if (seq_id == target_segment_id) {
+                found_target = true;
+                break;
+            }
+        }
+
+        if (!found_target) {
+            std::cout << "Target segment not in sequence, adding as final overlay" << std::endl;
+
+            QuadSurface* target_surf = target_meta->surface();
+            AlignmentResult alignment = findAlignment(seed_surf, target_surf);
+
+            if (alignment.valid) {
+                auto [target_image, target_mask] = loadOrGenerateMaskedImage(target_surf, target_meta->path);
+                overlaps.push_back({
+                    target_image,
+                    target_mask,
+                    alignment.pixel_offset,
+                    tint_colors_[color_idx % tint_colors_.size()]
+                });
+            } else {
+                std::cerr << "Failed to align target segment: " << target_segment_id << std::endl;
+            }
+        }
+
+        // Composite all segments with seed as base
+        cv::Mat final_image = compositeSegments(root_image, root_mask, overlaps, opacity);
+
+        // Save output
+        cv::imwrite(output_path.string(), final_image);
+        std::cout << "Saved to: " << output_path << std::endl;
+
+        return final_image;
+    }
+
+    std::vector<std::string> getOverlapIds(const std::string& root_id,
+                                          std::shared_ptr<SurfaceMeta> root_meta,
+                                          std::string source) {
+        std::vector<std::string> overlap_ids;
+
+        if (source == "overlapping") {
+            // Original behavior - use overlapping.json
+            root_meta->readOverlapping();
+            if (root_meta->overlapping_str.empty()) {
+                throw std::runtime_error("No overlapping segments found in overlapping.json for segment: " + root_id);
+            }
+            //overlap_ids = root_meta->overlapping_str;
+        } else if (source == "contributing")  {
+            // Load from meta.json contributing_surfaces field
+            fs::path meta_path = root_meta->path / "meta.json";
+            if (!fs::exists(meta_path)) {
+                throw std::runtime_error("meta.json not found for segment: " + root_id);
+            }
+
+            std::ifstream meta_file(meta_path);
+            json meta_json;
+            meta_file >> meta_json;
+
+            if (!meta_json.contains("contributing_surfaces")) {
+                throw std::runtime_error("contributing_surfaces not found in meta.json for segment: " + root_id);
+            }
+
+            overlap_ids = meta_json["contributing_surfaces"].get<std::vector<std::string>>();
+            if (overlap_ids.empty()) {
+                throw std::runtime_error("contributing_surfaces is empty in meta.json for segment: " + root_id);
+            }
+        }
+        // Note: "sequence" is now handled separately in render() method
+
+        return overlap_ids;
+    }
+
     std::pair<cv::Mat_<cv::Vec3b>, cv::Mat_<uint8_t>> loadOrGenerateMaskedImage(
         QuadSurface* surf, const fs::path& segment_path) {
 
         cv::Mat_<uint8_t> mask;
         cv::Mat_<uint8_t> img;
+        fs::path mask_path = segment_path / "mask.tif";
 
         // Check if mask.tif exists
-        fs::path mask_path = segment_path / "mask.tif";
+        //TODO: fixme
+        /*
         if (fs::exists(mask_path)) {
             std::cout << "Loading existing mask from: " << mask_path << std::endl;
             std::vector<cv::Mat> layers;
             cv::imreadmulti(mask_path.string(), layers, cv::IMREAD_GRAYSCALE);
-            if (!layers.empty()) {
+            if (layers.size() == 2) {
                 mask = layers[1];
                 cv::Size surf_size = surf->size();
                 if (mask.size() != surf_size) {
                     cv::resize(mask, mask, surf_size, 0, 0, cv::INTER_NEAREST);
                 }
             }
-        }
+        }*/
 
         // If no mask loaded, generate it along with the image
         if (mask.empty()) {
@@ -372,11 +520,12 @@ private:
 
 
 int main(int argc, char* argv[]) {
-    if (argc != 5) {
-        std::cout << "Usage: " << argv[0] << " <volpkg-path> <volume-id> <segment-id> <output-png> " << std::endl;
+    if (argc != 6) {
+        std::cout << "Usage: " << argv[0] << " <volpkg-path> <volume-id> <segment-id> <overlap-source> <output-png> " << std::endl;
         std::cout << "  volpkg-path: Path to volume package" << std::endl;
         std::cout << "  volume-id: ID of volume to use" << std::endl;
         std::cout << "  segment-id: ID of segment to render" << std::endl;
+        std::cout << "  overlap-source: Source for overlaps (overlapping|contributing|sequence)" << std::endl;
         std::cout << "  output-png: Output file path" << std::endl;
         return EXIT_SUCCESS;
     }
@@ -384,8 +533,15 @@ int main(int argc, char* argv[]) {
     fs::path volpkg_path = argv[1];
     std::string volume_id = argv[2];
     std::string segment_id = argv[3];
-    fs::path output_path = argv[4];
-    float opacity = 0.5f;
+    std::string overlap_source = argv[4];
+    fs::path output_path = argv[5];
+    float opacity = 0.8f;
+
+    // Parse overlap source
+    if (overlap_source != "overlapping" && overlap_source != "sequence" && overlap_source != "contributing") {
+        std::cerr << "Error: Invalid overlap source. Must be one of: overlapping, contributing, sequence" << std::endl;
+        return EXIT_FAILURE;
+    }
 
     // Validate opacity
     if (opacity < 0.0f || opacity > 1.0f) {
@@ -395,7 +551,7 @@ int main(int argc, char* argv[]) {
 
     try {
         SegmentRenderer renderer(volpkg_path, volume_id);
-        renderer.render(segment_id, output_path, opacity);
+        renderer.render(segment_id, output_path, overlap_source, opacity);
         return EXIT_SUCCESS;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

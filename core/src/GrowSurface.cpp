@@ -18,6 +18,8 @@
 #include <fstream>
 #include <iostream>
 
+bool SAVE_INPAINTING = false;
+
 int static dbg_counter = 0;
 // Default values for thresholds Will be configurable through JSON
 static float local_cost_inl_th = 0.2;
@@ -240,6 +242,20 @@ public:
     cv::Vec3d seed_coord;
     cv::Vec2i seed_loc;
 };
+
+static std::set<std::string> get_contributing_surfaces(const SurfTrackerData& data, const cv::Mat_<uint8_t>& state, const cv::Rect& used_area) {
+    std::set<std::string> contributing_surfaces;
+    for(int j = used_area.y; j < used_area.br().y; j++) {
+        for(int i = used_area.x; i < used_area.br().x; i++) {
+            if (state(j,i) & STATE_LOC_VALID) {
+                for(auto sm : data.surfsC({j,i})) {
+                    contributing_surfaces.insert(sm->name());
+                }
+            }
+        }
+    }
+    return contributing_surfaces;
+}
 
 static void copy(const SurfTrackerData &src, SurfTrackerData &tgt, const cv::Rect &roi_)
 {
@@ -893,10 +909,12 @@ static void optimize_surface_mapping(SurfTrackerData &data, cv::Mat_<uint8_t> &s
     {
         cv::Mat_<cv::Vec3d> points_hr_inp = surftrack_genpoints_hr(data, new_state, points_inpainted, used_area, step, src_step, true);
         try {
-            auto dbg_surf = new QuadSurface(points_hr_inp(used_area_hr), {1/src_step,1/src_step});
-            std::string uuid = Z_DBG_GEN_PREFIX+get_surface_time_str()+"_inp_hr";
-            dbg_surf->save(tgt_dir / uuid, uuid);
-            delete dbg_surf;
+            if (SAVE_INPAINTING) {
+                auto dbg_surf = new QuadSurface(points_hr_inp(used_area_hr), {1/src_step,1/src_step});
+                std::string uuid = Z_DBG_GEN_PREFIX+get_surface_time_str()+"_inp_hr";
+                dbg_surf->save(tgt_dir / uuid, uuid);
+                delete dbg_surf;
+            }
         } catch (cv::Exception&) {
             // We did not find a valid region of interest to expand to
             std::cout << "optimizer: no valid region of interest found" << std::endl;
@@ -1062,10 +1080,12 @@ static void optimize_surface_mapping(SurfTrackerData &data, cv::Mat_<uint8_t> &s
     {
         cv::Mat_<cv::Vec3d> points_hr_inp = surftrack_genpoints_hr(data, state, points, used_area, step, src_step, true);
         try {
-            auto dbg_surf = new QuadSurface(points_hr_inp(used_area_hr), {1/src_step,1/src_step});
-            std::string uuid = Z_DBG_GEN_PREFIX+get_surface_time_str()+"_opt_inp_hr";
-            dbg_surf->save(tgt_dir / uuid, uuid);
-            delete dbg_surf;
+            if (SAVE_INPAINTING) {
+                auto dbg_surf = new QuadSurface(points_hr_inp(used_area_hr), {1/src_step,1/src_step});
+                std::string uuid = Z_DBG_GEN_PREFIX+get_surface_time_str()+"_opt_inp_hr";
+                dbg_surf->save(tgt_dir / uuid, uuid);
+                delete dbg_surf;
+            }
         } catch (cv::Exception&) {
             // We did not find a valid region of interest to expand to
             std::cout << "optimizer: no valid region of interest found" << std::endl;
@@ -1077,6 +1097,9 @@ static void optimize_surface_mapping(SurfTrackerData &data, cv::Mat_<uint8_t> &s
 
 QuadSurface *grow_surf_from_surfs(SurfaceMeta *seed, const std::vector<SurfaceMeta*> &surfs_v, const nlohmann::json &params, float voxelsize)
 {
+    QuadSurface* accumulated_surface = nullptr;
+    std::vector<std::string> surface_sequence;
+
     bool flip_x = params.value("flip_x", 0);
     int global_steps_per_window = params.value("global_steps_per_window", 0);
 
@@ -1647,21 +1670,71 @@ QuadSurface *grow_surf_from_surfs(SurfaceMeta *seed, const std::vector<SurfaceMe
             update_mapping = false;
 
         if (generation % 50 == 0 || update_mapping /*|| generation < 10*/) {
-            {
-                cv::Mat_<cv::Vec3d> points_hr = surftrack_genpoints_hr(data, state, points, used_area, step, src_step);
-                auto dbg_surf = new QuadSurface(points_hr(used_area_hr), {1/src_step,1/src_step});
-                dbg_surf->meta = new nlohmann::json;
-                (*dbg_surf->meta)["vc_grow_seg_from_segments_params"] = params;
+            std::string timestamp = get_surface_time_str();
+            std::set<std::string> contributing_surfaces = get_contributing_surfaces(data, state, used_area);
 
-                float const area_est_vx2 = loc_valid_count*src_step*src_step*step*step;
-                float const area_est_cm2 = area_est_vx2 * voxelsize * voxelsize / 1e8;
-                (*dbg_surf->meta)["area_vx2"] = area_est_vx2;
-                (*dbg_surf->meta)["area_cm2"] = area_est_cm2;
-                (*dbg_surf->meta)["used_approved_segments"] = std::vector<std::string>(used_approved_names.begin(), used_approved_names.end());
-                std::string uuid = Z_DBG_GEN_PREFIX+get_surface_time_str();
-                dbg_surf->save(tgt_dir / uuid, uuid);
-                delete dbg_surf;
+            cv::Mat_<cv::Vec3d> points_hr = surftrack_genpoints_hr(data, state, points, used_area, step, src_step);
+            auto dbg_surf = new QuadSurface(points_hr(used_area_hr), {1/src_step,1/src_step});
+            dbg_surf->meta = new nlohmann::json;
+            (*dbg_surf->meta)["vc_grow_seg_from_segments_params"] = params;
+
+            float area_est_vx2 = loc_valid_count*src_step*src_step*step*step;
+            float area_est_cm2 = area_est_vx2 * voxelsize * voxelsize / 1e8;
+            (*dbg_surf->meta)["generation"] = generation;
+            (*dbg_surf->meta)["seed"] = seed->name();
+            (*dbg_surf->meta)["surface_sequence"] = surface_sequence;
+            (*dbg_surf->meta)["contributing_surfaces"] = contributing_surfaces;
+            (*dbg_surf->meta)["area_vx2"] = area_est_vx2;
+            (*dbg_surf->meta)["area_cm2"] = area_est_cm2;
+            (*dbg_surf->meta)["used_approved_segments"] = std::vector<std::string>(used_approved_names.begin(), used_approved_names.end());
+            std::string uuid = Z_DBG_GEN_PREFIX+timestamp;
+            dbg_surf->save(tgt_dir / uuid, uuid);
+
+
+            QuadSurface *unique_surf = nullptr;
+            if (accumulated_surface) {
+                unique_surf = surface_diff(dbg_surf, accumulated_surface, 2.0);
+            } else {
+                unique_surf = new QuadSurface(dbg_surf->rawPoints(), dbg_surf->scale());
             }
+
+            // Calculate unique surface metrics
+            cv::Mat_<cv::Vec3f> unique_points = unique_surf->rawPoints();
+            int unique_valid_count = 0;
+            for (int j = 0; j < unique_points.rows; j++) {
+                for (int i = 0; i < unique_points.cols; i++) {
+                    if (unique_points(j, i)[0] != -1) {
+                        unique_valid_count++;
+                    }
+                }
+            }
+            float unique_area_vx2 = unique_valid_count * unique_surf->scale()[0] * unique_surf->scale()[1];
+            float unique_area_cm2 = unique_area_vx2 * voxelsize * voxelsize / 1e8;
+
+            // Use same base UUID for both
+            std::string uuid_base = Z_DBG_GEN_PREFIX + timestamp;
+            std::string uuid_unique = uuid_base + "_unique";
+            std::string uuid_full = uuid_base;
+
+            unique_surf->meta = new nlohmann::json;
+            (*unique_surf->meta)["generation"] = generation;
+            (*unique_surf->meta)["seed"] = seed->name();
+            (*unique_surf->meta)["surface_sequence"] = surface_sequence;
+            (*unique_surf->meta)["contributing_surfaces"] = contributing_surfaces;
+            (*unique_surf->meta)["area_vx2"] = unique_area_vx2;
+            (*unique_surf->meta)["area_cm2"] = unique_area_cm2;
+            (*unique_surf->meta)["used_approved_segments"] = std::vector<std::string>(used_approved_names.begin(), used_approved_names.end());
+
+
+            unique_surf->save(tgt_dir / uuid_unique, uuid_unique);
+
+            if (accumulated_surface) {
+                delete accumulated_surface;
+            }
+            accumulated_surface = new QuadSurface(dbg_surf->rawPoints(), dbg_surf->scale());
+            surface_sequence.push_back(uuid_base);
+            delete dbg_surf;
+
         }
 
         //lets just see what happens
@@ -1695,19 +1768,21 @@ QuadSurface *grow_surf_from_surfs(SurfaceMeta *seed, const std::vector<SurfaceMe
                         fringe.insert(cv::Vec2i(j,i));
 
             {
-                cv::Mat_<cv::Vec3d> points_hr = surftrack_genpoints_hr(data, state, points, used_area, step, src_step);
-                auto dbg_surf = new QuadSurface(points_hr(used_area_hr), {1/src_step,1/src_step});
-                dbg_surf->meta = new nlohmann::json;
-                (*dbg_surf->meta)["vc_grow_seg_from_segments_params"] = params;
+                if (SAVE_INPAINTING) {
+                    cv::Mat_<cv::Vec3d> points_hr = surftrack_genpoints_hr(data, state, points, used_area, step, src_step);
+                    auto dbg_surf = new QuadSurface(points_hr(used_area_hr), {1/src_step,1/src_step});
+                    dbg_surf->meta = new nlohmann::json;
+                    (*dbg_surf->meta)["vc_grow_seg_from_segments_params"] = params;
 
-                std::string uuid = Z_DBG_GEN_PREFIX+get_surface_time_str()+"_opt";
-                float const area_est_vx2 = loc_valid_count*src_step*src_step*step*step;
-                float const area_est_cm2 = area_est_vx2 * voxelsize * voxelsize / 1e8;
-                (*dbg_surf->meta)["area_vx2"] = area_est_vx2;
-                (*dbg_surf->meta)["area_cm2"] = area_est_cm2;
-                (*dbg_surf->meta)["used_approved_segments"] = std::vector<std::string>(used_approved_names.begin(), used_approved_names.end());
-                dbg_surf->save(tgt_dir / uuid, uuid);
-                delete dbg_surf;
+                    std::string uuid = Z_DBG_GEN_PREFIX+get_surface_time_str()+"_opt";
+                    float const area_est_vx2 = loc_valid_count*src_step*src_step*step*step;
+                    float const area_est_cm2 = area_est_vx2 * voxelsize * voxelsize / 1e8;
+                    (*dbg_surf->meta)["area_vx2"] = area_est_vx2;
+                    (*dbg_surf->meta)["area_cm2"] = area_est_cm2;
+                    (*dbg_surf->meta)["used_approved_segments"] = std::vector<std::string>(used_approved_names.begin(), used_approved_names.end());
+                    dbg_surf->save(tgt_dir / uuid, uuid);
+                    delete dbg_surf;
+                }
             }
         }
 
