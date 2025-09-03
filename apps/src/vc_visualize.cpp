@@ -213,45 +213,21 @@ private:
         QuadSurface* target_surf = target_meta->surface();
         auto [target_image, target_mask] = loadOrGenerateMaskedImage(target_surf, target_meta->path);
 
-        // Find maximum dimensions
-        int max_width = target_image.cols;
-        int max_height = target_image.rows;
+        // Create output at target size
+        cv::Mat_<cv::Vec3b> output(target_image.size(), cv::Vec3b(0, 0, 0));
+        cv::Mat_<uint8_t> written_mask(target_image.size(), (uint8_t)0);
+        cv::Mat_<int> source_id_map(target_image.size(), -1);
 
-        // Check all patches to find max size
-        for (const std::string& patch_id : patch_ids) {
-            auto patch_meta = vpkg_->loadSurface(patch_id);
-            if (patch_meta) {
-                cv::Size s = patch_meta->surface()->size();
-                max_width = std::max(max_width, s.width);
-                max_height = std::max(max_height, s.height);
-            }
-        }
+        int total_surfaces = patch_ids.size() + 1;
 
-        // Create canvas
-        cv::Size canvas_size(max_width, max_height);
-        cv::Mat_<cv::Vec3b> output(canvas_size, cv::Vec3b(0, 0, 0));
-        cv::Mat_<uint8_t> written_mask(canvas_size, (uint8_t)0);
-
-        // Calculate center point
-        int center_x = canvas_size.width / 2;
-        int center_y = canvas_size.height / 2;
-
-        int total_surfaces = patch_ids.size() + 1; // +1 for target
-
-        // Draw target segment first
-        int target_offset_x = center_x - target_image.cols / 2;
-        int target_offset_y = center_y - target_image.rows / 2;
+        // Draw target first
         cv::Vec3b target_color = getColormapColor(0, total_surfaces);
-
         for (int j = 0; j < target_image.rows; j++) {
             for (int i = 0; i < target_image.cols; i++) {
                 if (target_mask(j, i)) {
-                    int out_x = i + target_offset_x;
-                    int out_y = j + target_offset_y;
-                    if (out_x >= 0 && out_x < output.cols && out_y >= 0 && out_y < output.rows) {
-                        output(out_y, out_x) = target_color;
-                        written_mask(out_y, out_x) = 1;
-                    }
+                    output(j, i) = target_color;
+                    written_mask(j, i) = 1;
+                    source_id_map(j, i) = 0;
                 }
             }
         }
@@ -268,33 +244,40 @@ private:
             }
 
             QuadSurface* patch_surf = patch_meta->surface();
-            auto [patch_image, patch_mask] = loadOrGenerateMaskedImage(patch_surf, patch_meta->path);
 
-            // Center this patch
-            int patch_offset_x = center_x - patch_image.cols / 2;
-            int patch_offset_y = center_y - patch_image.rows / 2;
+            // Find alignment for this patch
+            AlignmentResult alignment = findPatchAlignment(target_surf, patch_surf);
+
+            if (!alignment.valid) {
+                std::cerr << "Failed to align patch: " << patch_id << std::endl;
+                continue;
+            }
+
+            auto [patch_image, patch_mask] = loadOrGenerateMaskedImage(patch_surf, patch_meta->path);
 
             // Get colormap color
             cv::Vec3b color = getColormapColor(idx + 1, total_surfaces);
 
-            // Draw with write-once
+            // Draw with computed offset
             int pixels_written = 0;
             for (int j = 0; j < patch_image.rows; j++) {
                 for (int i = 0; i < patch_image.cols; i++) {
                     if (patch_mask(j, i)) {
-                        int out_x = i + patch_offset_x;
-                        int out_y = j + patch_offset_y;
+                        int out_x = i + alignment.pixel_offset[0];
+                        int out_y = j + alignment.pixel_offset[1];
                         if (out_x >= 0 && out_x < output.cols && out_y >= 0 && out_y < output.rows) {
                             if (!written_mask(out_y, out_x)) {
                                 output(out_y, out_x) = color;
                                 written_mask(out_y, out_x) = 1;
+                                source_id_map(out_y, out_x) = idx + 1;
                                 pixels_written++;
                             }
                         }
                     }
                 }
             }
-            std::cout << "Added " << pixels_written << " unique pixels from " << patch_id << std::endl;
+            std::cout << "Added " << pixels_written << " unique pixels from " << patch_id
+                     << " at offset " << alignment.pixel_offset << std::endl;
         }
 
         // Auto-crop
@@ -304,6 +287,62 @@ private:
         std::cout << "Saved to: " << output_path << std::endl;
 
         return cropped;
+    }
+
+    AlignmentResult findPatchAlignment(QuadSurface* target_surf, QuadSurface* patch_surf) {
+        AlignmentResult result;
+        result.valid = false;
+        result.num_correspondences = 0;
+
+        cv::Mat_<cv::Vec3f> patch_points = patch_surf->rawPoints();
+        std::vector<cv::Vec2f> patch_coords;
+        std::vector<cv::Vec2f> target_coords;
+
+        // Sample valid points from patch
+        int step = std::max(10, std::min(patch_points.rows, patch_points.cols) / 20);
+
+        for (int j = step; j < patch_points.rows - step; j += step) {
+            for (int i = step; i < patch_points.cols - step; i += step) {
+                cv::Vec3f point = patch_points(j, i);
+                if (point[0] == -1) continue;
+
+                // Find this 3D point in target surface
+                cv::Vec3f target_ptr = target_surf->pointer();
+                float dist = target_surf->pointTo(target_ptr, point, 2.0, 100);
+
+                if (dist >= 0 && dist <= 2.0) {
+                    cv::Vec3f target_loc = target_surf->loc_raw(target_ptr);
+                    patch_coords.push_back(cv::Vec2f(i, j));
+                    target_coords.push_back(cv::Vec2f(target_loc[0], target_loc[1]));
+
+                    if (patch_coords.size() >= 50) break;
+                }
+            }
+            if (patch_coords.size() >= 50) break;
+        }
+
+        if (patch_coords.size() < 5) {
+            return result;
+        }
+
+        // Compute median offset
+        std::vector<float> x_offsets, y_offsets;
+        for (size_t k = 0; k < patch_coords.size(); k++) {
+            x_offsets.push_back(target_coords[k][0] - patch_coords[k][0]);
+            y_offsets.push_back(target_coords[k][1] - patch_coords[k][1]);
+        }
+
+        std::sort(x_offsets.begin(), x_offsets.end());
+        std::sort(y_offsets.begin(), y_offsets.end());
+
+        result.pixel_offset = cv::Vec2f(
+            x_offsets[x_offsets.size() / 2],
+            y_offsets[y_offsets.size() / 2]
+        );
+        result.num_correspondences = patch_coords.size();
+        result.valid = true;
+
+        return result;
     }
 
     cv::Mat renderSequence(const std::string& target_segment_id, const fs::path& output_path, float opacity) {
