@@ -9,6 +9,9 @@
 #include <random>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <random>
+#include <iomanip>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -62,7 +65,7 @@ public:
         std::cout << "Using volume: " << volume_id << " (" << volume_->name() << ")" << std::endl;
         std::cout << "Volume dimensions: " << volume_->sliceWidth() << "x" << volume_->sliceHeight() << "x" << volume_->numSlices() << std::endl;
         std::cout << "Available scales: " << volume_->numScales() << std::endl;
-        cache_ = new ChunkCache(2ULL * 1024ULL * 1024ULL * 1024ULL);
+        cache_ = new ChunkCache(1ULL * 1024ULL * 1024ULL * 1024ULL);
     }
 
     ~SegmentRenderer() {
@@ -197,96 +200,52 @@ public:
 
 private:
     cv::Mat renderApprovedPatches(const std::string& target_segment_id, const fs::path& output_path, float opacity) {
-        std::cout << "Rendering approved patches for segment: " << target_segment_id << std::endl;
-
-        // Load target metadata
         auto target_meta = vpkg_->loadSurface(target_segment_id);
-        if (!target_meta) {
-            throw std::runtime_error("Failed to load target segment: " + target_segment_id);
-        }
-
-        // Get approved patches
-        std::vector<std::string> patch_ids = getOverlapIds(target_segment_id, target_meta, "approved_patches");
-        std::cout << "Found " << patch_ids.size() << " approved patches" << std::endl;
-
-        // Load target surface
         QuadSurface* target_surf = target_meta->surface();
-        auto [target_image, target_mask] = loadOrGenerateMaskedImage(target_surf, target_meta->path);
 
-        // Create output at target size
-        cv::Mat_<cv::Vec3b> output(target_image.size(), cv::Vec3b(0, 0, 0));
-        cv::Mat_<uint8_t> written_mask(target_image.size(), (uint8_t)0);
-        cv::Mat_<int> source_id_map(target_image.size(), -1);
+        // Work at reduced resolution
+        float work_scale = 4.0f;
+        cv::Size native_size = target_surf->size();
+        cv::Size work_size(native_size.width / work_scale, native_size.height / work_scale);
 
-        int total_surfaces = patch_ids.size() + 1;
+        std::cout << "Native size: " << native_size.width << "x" << native_size.height << std::endl;
+        std::cout << "Work size: " << work_size.width << "x" << work_size.height << std::endl;
 
-        // Draw target first
-        cv::Vec3b target_color = getColormapColor(0, total_surfaces);
-        for (int j = 0; j < target_image.rows; j++) {
-            for (int i = 0; i < target_image.cols; i++) {
-                if (target_mask(j, i)) {
-                    output(j, i) = target_color;
-                    written_mask(j, i) = 1;
-                    source_id_map(j, i) = 0;
+        // Generate coordinates at reduced resolution
+        cv::Mat_<cv::Vec3f> coords;
+        cv::Vec3f center = target_surf->pointer();
+        target_surf->gen(&coords, nullptr, work_size, center, work_scale, {0, 0, 0});
+
+        // Create output image - just show valid/invalid
+        cv::Mat_<cv::Vec3b> output(work_size, cv::Vec3b(0, 0, 0));
+
+        int valid_count = 0;
+        int invalid_count = 0;
+
+        for (int j = 0; j < work_size.height; j++) {
+            for (int i = 0; i < work_size.width; i++) {
+                cv::Vec3f point = coords(j, i);
+
+                // Check if point is valid
+                if (point[0] == -1 || std::isnan(point[0]) || std::isnan(point[1]) || std::isnan(point[2])) {
+                    output(j, i) = cv::Vec3b(0, 0, 0);  // Black for invalid
+                    invalid_count++;
+                } else {
+                    output(j, i) = cv::Vec3b(255, 255, 255);  // White for valid
+                    valid_count++;
                 }
             }
         }
 
-        // Process each approved patch
-        for (size_t idx = 0; idx < patch_ids.size(); idx++) {
-            const std::string& patch_id = patch_ids[idx];
-            std::cout << "Processing patch [" << idx << "]: " << patch_id << std::endl;
+        std::cout << "Valid points: " << valid_count << std::endl;
+        std::cout << "Invalid points: " << invalid_count << std::endl;
+        std::cout << "Total points: " << (valid_count + invalid_count) << std::endl;
 
-            auto patch_meta = vpkg_->loadSurface(patch_id);
-            if (!patch_meta) {
-                std::cerr << "Failed to load: " << patch_id << std::endl;
-                continue;
-            }
+        // Save at working resolution
+        cv::imwrite(output_path.string(), output);
+        std::cout << "Saved binary mask to: " << output_path << std::endl;
 
-            QuadSurface* patch_surf = patch_meta->surface();
-
-            // Find alignment for this patch
-            AlignmentResult alignment = findPatchAlignment(target_surf, patch_surf);
-
-            if (!alignment.valid) {
-                std::cerr << "Failed to align patch: " << patch_id << std::endl;
-                continue;
-            }
-
-            auto [patch_image, patch_mask] = loadOrGenerateMaskedImage(patch_surf, patch_meta->path);
-
-            // Get colormap color
-            cv::Vec3b color = getColormapColor(idx + 1, total_surfaces);
-
-            // Draw with computed offset
-            int pixels_written = 0;
-            for (int j = 0; j < patch_image.rows; j++) {
-                for (int i = 0; i < patch_image.cols; i++) {
-                    if (patch_mask(j, i)) {
-                        int out_x = i + alignment.pixel_offset[0];
-                        int out_y = j + alignment.pixel_offset[1];
-                        if (out_x >= 0 && out_x < output.cols && out_y >= 0 && out_y < output.rows) {
-                            if (!written_mask(out_y, out_x)) {
-                                output(out_y, out_x) = color;
-                                written_mask(out_y, out_x) = 1;
-                                source_id_map(out_y, out_x) = idx + 1;
-                                pixels_written++;
-                            }
-                        }
-                    }
-                }
-            }
-            std::cout << "Added " << pixels_written << " unique pixels from " << patch_id
-                     << " at offset " << alignment.pixel_offset << std::endl;
-        }
-
-        // Auto-crop
-        cv::Mat cropped = autoCrop(output, written_mask);
-
-        cv::imwrite(output_path.string(), cropped);
-        std::cout << "Saved to: " << output_path << std::endl;
-
-        return cropped;
+        return output;
     }
 
     AlignmentResult findPatchAlignment(QuadSurface* target_surf, QuadSurface* patch_surf) {

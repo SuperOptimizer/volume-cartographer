@@ -1531,3 +1531,147 @@ QuadSurface* surface_intersection(QuadSurface* a, QuadSurface* b, float toleranc
 
     return new QuadSurface(intersect_points, a->scale());
 }
+
+
+void CompactSurfaceVoxelCache::set_bit(int px, int py, int pz, int dx, int dy, int dz) {
+    if (px < 0 || px >= packed_dims[0] ||
+        py < 0 || py >= packed_dims[1] ||
+        pz < 0 || pz >= packed_dims[2]) return;
+
+    int bit_index = dx + dy*2 + dz*4;  // 0-7
+    packed_volume.at<uint8_t>(pz, py, px) |= (1 << bit_index);
+}
+
+bool CompactSurfaceVoxelCache::get_bit(int px, int py, int pz, int dx, int dy, int dz) const {
+    if (px < 0 || px >= packed_dims[0] ||
+        py < 0 || py >= packed_dims[1] ||
+        pz < 0 || pz >= packed_dims[2]) return false;
+
+    int bit_index = dx + dy*2 + dz*4;
+    return (packed_volume.at<uint8_t>(pz, py, px) >> bit_index) & 1;
+}
+
+CompactSurfaceVoxelCache::CompactSurfaceVoxelCache(QuadSurface* surf, float base_resolution) {
+    // Get bounding box
+    Rect3D bbox = surf->bbox();
+    origin = bbox.low;
+    voxel_size = base_resolution;  // Already 2x downscaled
+
+    // Calculate logical voxel dimensions (after 2x downscale)
+    cv::Vec3f box_size = bbox.high - bbox.low;
+    int voxel_dims_x = std::ceil(box_size[0] / voxel_size) + 2;
+    int voxel_dims_y = std::ceil(box_size[1] / voxel_size) + 2;
+    int voxel_dims_z = std::ceil(box_size[2] / voxel_size) + 2;
+
+    // Calculate packed dimensions (each byte holds 2x2x2 voxels)
+    packed_dims[0] = (voxel_dims_x + 1) / 2;  // Round up
+    packed_dims[1] = (voxel_dims_y + 1) / 2;
+    packed_dims[2] = (voxel_dims_z + 1) / 2;
+
+    // Create packed volume
+    int sizes[] = {packed_dims[2], packed_dims[1], packed_dims[0]};
+    packed_volume = cv::Mat_<uint8_t>(3, sizes, uint8_t(0));
+
+    // Fill volume from surface points
+    cv::Mat_<cv::Vec3f> points = surf->rawPoints();
+
+    // Downsample by 2 in grid space
+    for(int j = 0; j < points.rows; j += 2) {
+        for(int i = 0; i < points.cols; i += 2) {
+            cv::Vec3f p = points(j, i);
+            if (p[0] == -1) {
+                // Check neighboring points in 2x2 block
+                if (i+1 < points.cols && points(j, i+1)[0] != -1)
+                    p = points(j, i+1);
+                else if (j+1 < points.rows && points(j+1, i)[0] != -1)
+                    p = points(j+1, i);
+                else if (i+1 < points.cols && j+1 < points.rows && points(j+1, i+1)[0] != -1)
+                    p = points(j+1, i+1);
+                else
+                    continue;
+            }
+
+            // Convert to voxel indices
+            int vx = std::round((p[0] - origin[0]) / voxel_size);
+            int vy = std::round((p[1] - origin[1]) / voxel_size);
+            int vz = std::round((p[2] - origin[2]) / voxel_size);
+
+            // Convert to packed indices and bit position
+            int px = vx / 2;
+            int py = vy / 2;
+            int pz = vz / 2;
+            int dx = vx % 2;
+            int dy = vy % 2;
+            int dz = vz % 2;
+
+            set_bit(px, py, pz, dx, dy, dz);
+        }
+    }
+}
+
+bool CompactSurfaceVoxelCache::contains(const cv::Vec3f& point, float tolerance) const {
+    // Adjust tolerance for downscaling (doubled due to 2x downscale)
+    float adj_tolerance = tolerance / voxel_size;
+
+    // Quick bbox check
+    if (point[0] < origin[0] - tolerance ||
+        point[1] < origin[1] - tolerance ||
+        point[2] < origin[2] - tolerance) {
+        return false;
+    }
+
+    // Convert to voxel coordinates
+    float fx = (point[0] - origin[0]) / voxel_size;
+    float fy = (point[1] - origin[1]) / voxel_size;
+    float fz = (point[2] - origin[2]) / voxel_size;
+
+    int cx = std::round(fx);
+    int cy = std::round(fy);
+    int cz = std::round(fz);
+
+    // Calculate search radius in voxels
+    int radius = std::ceil(adj_tolerance);
+
+    // Check neighborhood
+    for(int vz = cz - radius; vz <= cz + radius; vz++) {
+        for(int vy = cy - radius; vy <= cy + radius; vy++) {
+            for(int vx = cx - radius; vx <= cx + radius; vx++) {
+                // Check distance
+                float dx = vx - fx;
+                float dy = vy - fy;
+                float dz = vz - fz;
+                float dist_sq = dx*dx + dy*dy + dz*dz;
+
+                if (dist_sq > adj_tolerance * adj_tolerance)
+                    continue;
+
+                // Convert to packed indices
+                int px = vx / 2;
+                int py = vy / 2;
+                int pz = vz / 2;
+                int bit_x = vx % 2;
+                int bit_y = vy % 2;
+                int bit_z = vz % 2;
+
+                if (get_bit(px, py, pz, bit_x, bit_y, bit_z)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+void CompactSurfaceVoxelCache::contains_batch(const std::vector<cv::Vec3f>& points, std::vector<bool>& results, float tolerance) const {
+    results.resize(points.size());
+
+    #pragma omp parallel for
+    for(size_t i = 0; i < points.size(); i++) {
+        results[i] = contains(points[i], tolerance);
+    }
+}
+
+size_t CompactSurfaceVoxelCache::memory_bytes() const {
+    return packed_volume.total() * packed_volume.elemSize();
+}

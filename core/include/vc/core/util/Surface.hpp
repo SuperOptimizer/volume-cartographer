@@ -110,6 +110,8 @@ public:
     virtual cv::Mat_<cv::Vec3f> rawPoints() { return *_points; }
     virtual cv::Mat_<cv::Vec3f> *rawPointsPtr() { return _points; }
 
+    bool containsPoint(const cv::Vec3f &tgt, float threshold) const;
+
     friend QuadSurface *regularized_local_quad(QuadSurface *src, const cv::Vec3f &ptr, int w, int h, int step_search, int step_out);
     friend QuadSurface *smooth_vc_segmentation(QuadSurface *src);
     friend class ControlPointSurface;
@@ -203,6 +205,23 @@ public:
     nlohmann::json *meta = nullptr;
     std::set<std::string> overlapping_str;
     std::set<SurfaceMeta*> overlapping;
+};
+
+class CompactSurfaceVoxelCache {
+private:
+    cv::Mat_<uint8_t> packed_volume;  // Bit-packed 3D volume
+    cv::Vec3f origin;                  // Bounding box minimum
+    float voxel_size;                  // Size of each voxel (after 2x downscale)
+    cv::Vec3i packed_dims;             // Packed volume dimensions
+
+    void set_bit(int px, int py, int pz, int dx, int dy, int dz);
+    [[nodiscard]] bool get_bit(int px, int py, int pz, int dx, int dy, int dz) const;
+
+public:
+    explicit CompactSurfaceVoxelCache(QuadSurface* surf, float base_resolution = 2.0);
+    [[nodiscard]] bool contains(const cv::Vec3f& point, float tolerance = 4.0) const;
+    void contains_batch(const std::vector<cv::Vec3f>& points, std::vector<bool>& results, float tolerance = 4.0) const;
+    [[nodiscard]] size_t memory_bytes() const;
 };
 
 QuadSurface *load_quad_from_tifxyz(const std::string &path);
