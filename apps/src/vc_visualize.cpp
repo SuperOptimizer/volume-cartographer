@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <random>
 #include <iomanip>
-#include <omp.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -204,103 +203,140 @@ private:
         auto target_meta = vpkg_->loadSurface(target_segment_id);
         QuadSurface* target_surf = target_meta->surface();
 
-        // Get the raw points directly
-        cv::Mat_<cv::Vec3f> points = target_surf->rawPoints();
+        cv::Mat_<cv::Vec3f> raw_points = target_surf->rawPoints();
+        cv::Vec2f stored_scale = target_surf->scale();
 
-        std::cout << "Target surface size: " << points.cols << "x" << points.rows << std::endl;
-        std::cout << "Surface scale: " << target_surf->scale()[0] << "x" << target_surf->scale()[1] << std::endl;
+        // Calculate native resolution
+        int native_width = raw_points.cols / stored_scale[0];
+        int native_height = raw_points.rows / stored_scale[1];
 
-        // Get approved patches
+        std::cout << "Stored points: " << raw_points.cols << "x" << raw_points.rows
+                  << " at scale " << stored_scale[0] << std::endl;
+        std::cout << "Native resolution: " << native_width << "x" << native_height << std::endl;
+
+        // Choose downsampling factor from native
+        float gen_scale = 1.0f;
+
+        // Calculate the output size at our chosen scale
+        cv::Size gen_size(
+            native_width / gen_scale,
+            native_height / gen_scale
+        );
+
+        std::cout << "Generating with scale factor " << gen_scale
+                  << " (output: " << gen_size.width << "x" << gen_size.height << ")" << std::endl;
+
+        // Generate high-quality interpolated coordinates
+        cv::Mat_<cv::Vec3f> coords;
+        cv::Vec3f center = target_surf->pointer();
+
+        // KEY FIX: Offset to cover the full surface
+        // We need to offset by negative half the dimensions to get full coverage
+        cv::Vec3f offset = {
+            -(float)(gen_size.width / 2),
+            -(float)(gen_size.height / 2),
+            0
+        };
+
+        target_surf->gen(&coords, nullptr, gen_size, center, gen_scale, offset);
+
+        std::cout << "Generated coords size: " << coords.cols << "x" << coords.rows << std::endl;
+
+        // Rest of your code remains the same...
+        // Load patches
         std::vector<std::string> patch_ids = getOverlapIds(target_segment_id, target_meta, "approved_patches");
-        std::cout << "Found " << patch_ids.size() << " approved patches" << std::endl;
-
-        // Create output image - start with white (for invalid points)
-        cv::Mat_<cv::Vec3b> output(points.size(), cv::Vec3b(255, 255, 255));
-
-        // Load all patches
         std::vector<QuadSurface*> patch_surfaces;
         for (const auto& patch_id : patch_ids) {
-            std::cout << "Loading patch: " << patch_id << std::endl;
             auto patch_meta = vpkg_->loadSurface(patch_id);
             if (patch_meta) {
                 patch_surfaces.push_back(patch_meta->surface());
-            } else {
-                std::cerr << "Failed to load patch: " << patch_id << std::endl;
             }
         }
 
-        int total_patches = patch_surfaces.size();
-        std::cout << "Loaded " << total_patches << " patches successfully" << std::endl;
+        std::cout << "Loaded " << patch_surfaces.size() << " patches" << std::endl;
 
-        // Track statistics
-        std::vector<std::atomic<int>> patch_counts(total_patches);
-        for (int i = 0; i < total_patches; i++) {
+        // Hardcoded stride
+        int stride = 8;
+        cv::Size process_size(gen_size.width / stride, gen_size.height / stride);
+
+        cv::Mat_<cv::Vec3b> output_sparse(process_size, cv::Vec3b(255, 255, 255));
+
+        std::cout << "Processing with stride " << stride << ": "
+                  << process_size.width << "x" << process_size.height << std::endl;
+
+        std::atomic<int> valid_count(0), unmatched_count(0);
+        std::vector<std::atomic<int>> patch_counts(patch_surfaces.size());
+        for (int i = 0; i < patch_surfaces.size(); i++) {
             patch_counts[i] = 0;
         }
-        std::atomic<int> valid_count(0);
-        std::atomic<int> unmatched_count(0);
 
-        // Process each point
-        omp_set_num_threads(14);
         #pragma omp parallel for schedule(dynamic, 1)
-        for (int j = 0; j < points.rows; j++) {
+        for (int j = 0; j < process_size.height; j++) {
             #pragma omp critical
             {
-                std::cout << "Processing row " << j << "/" << points.rows << std::endl;
+                std::cout << "Processing row " << j << "/" << process_size.height << std::endl;
             }
-            for (int i = 0; i < points.cols; i++) {
-                cv::Vec3f point = points(j, i);
 
-                // Skip invalid points - they stay white
+            for (int i = 0; i < process_size.width; i++) {
+                int src_j = j * stride;
+                int src_i = i * stride;
+
+                cv::Vec3f point = coords(src_j, src_i);
+
                 if (point[0] == -1 || std::isnan(point[0]) || std::isnan(point[1]) || std::isnan(point[2])) {
                     continue;
                 }
 
                 valid_count++;
 
-                // Check each patch in order
                 bool found_in_patch = false;
-                for (int patch_idx = 0; patch_idx < total_patches; patch_idx++) {
-                    if (patch_surfaces[patch_idx]->containsPoint(point, 100.0f)) {
-                        // Use viridis colormap for this patch
-                        output(j, i) = getColormapColor(patch_idx, total_patches);
+#if 0
+                for (int patch_idx = 0; patch_idx < patch_surfaces.size(); patch_idx++) {
+                    cv::Vec3f ptr = patch_surfaces[patch_idx]->pointer();
+
+                    float tolerance = 10.0f;
+                    float dist = patch_surfaces[patch_idx]->pointTo(ptr, point, tolerance, 10);
+
+                    if (dist >= 0 && dist <= tolerance) {
+                        output_sparse(j, i) = getColormapColor(patch_idx, patch_surfaces.size());
                         patch_counts[patch_idx]++;
                         found_in_patch = true;
-                        break;  // Write-once: first patch wins
+                        break;
                     }
                 }
-
-                // If not in any patch, color it black
+#endif
                 if (!found_in_patch) {
-                    output(j, i) = cv::Vec3b(0, 0, 0);  // Black for unmatched
+                    output_sparse(j, i) = cv::Vec3b(0, 0, 0);
                     unmatched_count++;
                 }
             }
         }
 
-        // Print statistics
-        std::cout << "\n=== Final Statistics ===" << std::endl;
-        std::cout << "Total valid points: " << valid_count << std::endl;
-        std::cout << "Points not in any patch (black): " << unmatched_count
-                  << " (" << (100.0 * unmatched_count / valid_count) << "%)" << std::endl;
-
-        int total_in_patches = 0;
-        for (int i = 0; i < total_patches; i++) {
-            int count = patch_counts[i];
-            std::cout << "Patch " << i << " [" << patch_ids[i] << "]: " << count
-                      << " points (" << (100.0 * count / valid_count) << "%)" << std::endl;
-            total_in_patches += count;
+        // Fill in the sparse output to match gen_size
+        cv::Mat_<cv::Vec3b> output_final;
+        if (stride > 1) {
+            cv::resize(output_sparse, output_final, gen_size, 0, 0, cv::INTER_NEAREST);
+        } else {
+            output_final = output_sparse;
         }
 
-        std::cout << "Total points in patches: " << total_in_patches
-                  << " (" << (100.0 * total_in_patches / valid_count) << "%)" << std::endl;
-        std::cout << "======================\n" << std::endl;
+        cv::imwrite(output_path.string(), output_final);
 
-        // Save at raw resolution
-        cv::imwrite(output_path.string(), output);
-        std::cout << "Saved to: " << output_path << std::endl;
+        // Statistics
+        std::cout << "\n=== Statistics ===" << std::endl;
+        std::cout << "Valid points: " << valid_count << std::endl;
+        std::cout << "Unmatched: " << unmatched_count
+                  << " (" << (100.0 * unmatched_count / std::max(1, (int)valid_count)) << "%)" << std::endl;
 
-        return output;
+        for (int i = 0; i < patch_surfaces.size(); i++) {
+            if (patch_counts[i] > 0) {
+                std::cout << "Patch " << i << ": " << patch_counts[i] << " points" << std::endl;
+            }
+        }
+
+        std::cout << "Saved at: " << output_final.cols << "x" << output_final.rows << std::endl;
+
+        return output_final;
     }
 
     AlignmentResult findPatchAlignment(QuadSurface* target_surf, QuadSurface* patch_surf) {
