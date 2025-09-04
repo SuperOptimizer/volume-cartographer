@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <random>
 #include <iomanip>
+#include <omp.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -203,47 +204,101 @@ private:
         auto target_meta = vpkg_->loadSurface(target_segment_id);
         QuadSurface* target_surf = target_meta->surface();
 
-        // Work at reduced resolution
-        float work_scale = 4.0f;
-        cv::Size native_size = target_surf->size();
-        cv::Size work_size(native_size.width / work_scale, native_size.height / work_scale);
+        // Get the raw points directly
+        cv::Mat_<cv::Vec3f> points = target_surf->rawPoints();
 
-        std::cout << "Native size: " << native_size.width << "x" << native_size.height << std::endl;
-        std::cout << "Work size: " << work_size.width << "x" << work_size.height << std::endl;
+        std::cout << "Target surface size: " << points.cols << "x" << points.rows << std::endl;
+        std::cout << "Surface scale: " << target_surf->scale()[0] << "x" << target_surf->scale()[1] << std::endl;
 
-        // Generate coordinates at reduced resolution
-        cv::Mat_<cv::Vec3f> coords;
-        cv::Vec3f center = target_surf->pointer();
-        target_surf->gen(&coords, nullptr, work_size, center, work_scale, {0, 0, 0});
+        // Get approved patches
+        std::vector<std::string> patch_ids = getOverlapIds(target_segment_id, target_meta, "approved_patches");
+        std::cout << "Found " << patch_ids.size() << " approved patches" << std::endl;
 
-        // Create output image - just show valid/invalid
-        cv::Mat_<cv::Vec3b> output(work_size, cv::Vec3b(0, 0, 0));
+        // Create output image - start with white (for invalid points)
+        cv::Mat_<cv::Vec3b> output(points.size(), cv::Vec3b(255, 255, 255));
 
-        int valid_count = 0;
-        int invalid_count = 0;
+        // Load all patches
+        std::vector<QuadSurface*> patch_surfaces;
+        for (const auto& patch_id : patch_ids) {
+            std::cout << "Loading patch: " << patch_id << std::endl;
+            auto patch_meta = vpkg_->loadSurface(patch_id);
+            if (patch_meta) {
+                patch_surfaces.push_back(patch_meta->surface());
+            } else {
+                std::cerr << "Failed to load patch: " << patch_id << std::endl;
+            }
+        }
 
-        for (int j = 0; j < work_size.height; j++) {
-            for (int i = 0; i < work_size.width; i++) {
-                cv::Vec3f point = coords(j, i);
+        int total_patches = patch_surfaces.size();
+        std::cout << "Loaded " << total_patches << " patches successfully" << std::endl;
 
-                // Check if point is valid
+        // Track statistics
+        std::vector<std::atomic<int>> patch_counts(total_patches);
+        for (int i = 0; i < total_patches; i++) {
+            patch_counts[i] = 0;
+        }
+        std::atomic<int> valid_count(0);
+        std::atomic<int> unmatched_count(0);
+
+        // Process each point
+        omp_set_num_threads(14);
+        #pragma omp parallel for schedule(dynamic, 2)
+        for (int j = 0; j < points.rows; j++) {
+            #pragma omp critical
+            {
+                std::cout << "Processing row " << j << "/" << points.rows << std::endl;
+            }
+            for (int i = 0; i < points.cols; i++) {
+                cv::Vec3f point = points(j, i);
+
+                // Skip invalid points - they stay white
                 if (point[0] == -1 || std::isnan(point[0]) || std::isnan(point[1]) || std::isnan(point[2])) {
-                    output(j, i) = cv::Vec3b(0, 0, 0);  // Black for invalid
-                    invalid_count++;
-                } else {
-                    output(j, i) = cv::Vec3b(255, 255, 255);  // White for valid
-                    valid_count++;
+                    continue;
+                }
+
+                valid_count++;
+
+                // Check each patch in order
+                bool found_in_patch = false;
+                for (int patch_idx = 0; patch_idx < total_patches; patch_idx++) {
+                    if (patch_surfaces[patch_idx]->containsPoint(point, 100.0f)) {
+                        // Use viridis colormap for this patch
+                        output(j, i) = getColormapColor(patch_idx, total_patches);
+                        patch_counts[patch_idx]++;
+                        found_in_patch = true;
+                        break;  // Write-once: first patch wins
+                    }
+                }
+
+                // If not in any patch, color it black
+                if (!found_in_patch) {
+                    output(j, i) = cv::Vec3b(0, 0, 0);  // Black for unmatched
+                    unmatched_count++;
                 }
             }
         }
 
-        std::cout << "Valid points: " << valid_count << std::endl;
-        std::cout << "Invalid points: " << invalid_count << std::endl;
-        std::cout << "Total points: " << (valid_count + invalid_count) << std::endl;
+        // Print statistics
+        std::cout << "\n=== Final Statistics ===" << std::endl;
+        std::cout << "Total valid points: " << valid_count << std::endl;
+        std::cout << "Points not in any patch (black): " << unmatched_count
+                  << " (" << (100.0 * unmatched_count / valid_count) << "%)" << std::endl;
 
-        // Save at working resolution
+        int total_in_patches = 0;
+        for (int i = 0; i < total_patches; i++) {
+            int count = patch_counts[i];
+            std::cout << "Patch " << i << " [" << patch_ids[i] << "]: " << count
+                      << " points (" << (100.0 * count / valid_count) << "%)" << std::endl;
+            total_in_patches += count;
+        }
+
+        std::cout << "Total points in patches: " << total_in_patches
+                  << " (" << (100.0 * total_in_patches / valid_count) << "%)" << std::endl;
+        std::cout << "======================\n" << std::endl;
+
+        // Save at raw resolution
         cv::imwrite(output_path.string(), output);
-        std::cout << "Saved binary mask to: " << output_path << std::endl;
+        std::cout << "Saved to: " << output_path << std::endl;
 
         return output;
     }
