@@ -242,7 +242,7 @@ private:
 
         // Process each point
         omp_set_num_threads(14);
-        #pragma omp parallel for schedule(dynamic, 2)
+        #pragma omp parallel for schedule(dynamic, 1)
         for (int j = 0; j < points.rows; j++) {
             #pragma omp critical
             {
