@@ -242,7 +242,6 @@ private:
 
         std::cout << "Generated coords size: " << coords.cols << "x" << coords.rows << std::endl;
 
-        // Rest of your code remains the same...
         // Load patches
         std::vector<std::string> patch_ids = getOverlapIds(target_segment_id, target_meta, "approved_patches");
         std::vector<QuadSurface*> patch_surfaces;
@@ -290,21 +289,22 @@ private:
                 valid_count++;
 
                 bool found_in_patch = false;
-#if 0
-                for (int patch_idx = 0; patch_idx < patch_surfaces.size(); patch_idx++) {
+
+                for (int patch_idx = 0; patch_idx < 5; patch_idx++) {
+                //for (int patch_idx = 0; patch_idx < patch_surfaces.size(); patch_idx++) {
                     cv::Vec3f ptr = patch_surfaces[patch_idx]->pointer();
 
                     float tolerance = 10.0f;
-                    float dist = patch_surfaces[patch_idx]->pointTo(ptr, point, tolerance, 10);
-
-                    if (dist >= 0 && dist <= tolerance) {
+                    //float dist = patch_surfaces[patch_idx]->pointTo(ptr, point, tolerance, 10);
+                    bool found = patch_surfaces[patch_idx]->containsPoint(point, tolerance);
+                    if (found) {
+                    //if (dist >= 0 && dist <= tolerance) {
                         output_sparse(j, i) = getColormapColor(patch_idx, patch_surfaces.size());
                         patch_counts[patch_idx]++;
                         found_in_patch = true;
                         break;
                     }
                 }
-#endif
                 if (!found_in_patch) {
                     output_sparse(j, i) = cv::Vec3b(0, 0, 0);
                     unmatched_count++;
@@ -312,15 +312,8 @@ private:
             }
         }
 
-        // Fill in the sparse output to match gen_size
-        cv::Mat_<cv::Vec3b> output_final;
-        if (stride > 1) {
-            cv::resize(output_sparse, output_final, gen_size, 0, 0, cv::INTER_NEAREST);
-        } else {
-            output_final = output_sparse;
-        }
-
-        cv::imwrite(output_path.string(), output_final);
+        // Directly save the sparse output without resizing
+        cv::imwrite(output_path.string(), output_sparse);
 
         // Statistics
         std::cout << "\n=== Statistics ===" << std::endl;
@@ -334,9 +327,9 @@ private:
             }
         }
 
-        std::cout << "Saved at: " << output_final.cols << "x" << output_final.rows << std::endl;
+        std::cout << "Saved at: " << output_sparse.cols << "x" << output_sparse.rows << std::endl;
 
-        return output_final;
+        return output_sparse;
     }
 
     AlignmentResult findPatchAlignment(QuadSurface* target_surf, QuadSurface* patch_surf) {
