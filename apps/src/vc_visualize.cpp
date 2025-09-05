@@ -271,7 +271,7 @@ cv::Mat renderApprovedPatches(const std::string& target_segment_id, const fs::pa
               << " cells, cell size: " << cell_size << std::endl;
 
     // Process with stride
-    int stride = 2;
+    int stride = 8;
     cv::Size process_size(gen_size.width / stride, gen_size.height / stride);
     cv::Mat_<cv::Vec3b> output_sparse(process_size, cv::Vec3b(255, 255, 255));
 
@@ -284,15 +284,14 @@ cv::Mat renderApprovedPatches(const std::string& target_segment_id, const fs::pa
         patch_counts[i] = 0;
     }
 
-    float tolerance = 40.0f;
+    float tolerance = 1.0f;
 
     #pragma omp parallel for schedule(dynamic, 1)
     for (int j = 0; j < process_size.height; j++) {
         #pragma omp critical
         {
-            if (j % 100 == 0) {
                 std::cout << "Processing row " << j << "/" << process_size.height << std::endl;
-            }
+
         }
 
         for (int i = 0; i < process_size.width; i++) {
@@ -312,9 +311,10 @@ cv::Mat renderApprovedPatches(const std::string& target_segment_id, const fs::pa
 
             bool found_in_patch = false;
 
-            // Only check candidate patches instead of all patches
             for (int patch_idx : candidates) {
-                if (patch_surfaces[patch_idx]->containsPoint(point, tolerance)) {
+                float dist = patch_surfaces[patch_idx]->containsPoint(point, tolerance);
+
+                if (dist >= 0 && dist <= tolerance) {
                     output_sparse(j, i) = getColormapColor(patch_idx, patch_surfaces.size());
                     patch_counts[patch_idx]++;
                     found_in_patch = true;
